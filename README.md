@@ -1,5 +1,7 @@
 # TerminalTown
 
+<img src="assets/terminaltown-logo.png" alt="TerminalTown logo" width="360">
+
 **See and control your terminal sessions in one board.**
 
 ![Application preview using synthetic or procedural content](docs/preview.png)
