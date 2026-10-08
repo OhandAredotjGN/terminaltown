@@ -1,0 +1,140 @@
+/* Panel selection follows the active skin, including keyboard and forced-color states. */
+.head .font-select {
+  appearance: none; -webkit-appearance: none; display: inline-grid; place-content: center;
+  flex: 0 0 16px; width: 16px; height: 16px; padding: 0; margin: 0 5px 0 0;
+  border: 1px solid var(--skin-muted); border-radius: 3px;
+  background: var(--skin-input); color: var(--skin-page); cursor: pointer;
+}
+.head .font-select::after {
+  content: ''; width: 7px; height: 4px; border: solid currentColor; border-width: 0 0 2px 2px;
+  transform: rotate(-45deg) translateY(-1px); opacity: 0;
+}
+.head .font-select:checked { background: var(--skin-accent); border-color: var(--skin-accent); }
+.head .font-select:checked::after { opacity: 1; }
+.head .font-select:hover { border-color: var(--skin-accent); box-shadow: 0 0 0 1px var(--skin-accent); }
+.head .font-select:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 3px; }
+.tile[data-panel-hue] { --skin-accent: var(--panel-hue-color); border-color: var(--panel-hue-color); }
+.tile[data-panel-hue] > .head { background: color-mix(in srgb, var(--skin-head) 88%, var(--panel-hue-color)); box-shadow: inset 3px 0 var(--panel-hue-color); }
+.tile[data-panel-hue] > .terminal-output { background: color-mix(in srgb, var(--skin-tile) 94%, var(--panel-hue-color)); }
+.tile[data-panel-hue].font-selected > .head { box-shadow: inset 3px 0 var(--panel-hue-color), inset 0 -2px var(--panel-hue-color); }
+.hue-settings { margin: 7px 0; border-block: 1px solid var(--skin-border); padding: 4px 0; }
+.hue-settings summary { cursor: pointer; padding: 7px 8px; font-weight: 700; }
+.hue-settings summary:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: -2px; }
+.hue-palette-editor { margin-top: 6px; border-top: 1px solid var(--skin-border); }
+.hue-editor { display: grid; grid-template-columns: minmax(0,1fr) 62px; gap: 8px; padding: 4px 8px; align-items: center; }
+.hue-editor input[type="number"] { width: 100%; box-sizing: border-box; height: 30px; border: 1px solid var(--skin-border); border-radius: 3px; }
+.hue-editor input[type="range"] {
+  appearance: none; -webkit-appearance: none; width: 100%; min-width: 0; padding: 0; margin: 0; height: 10px;
+  border: 1px solid var(--skin-border); border-radius: 8px;
+  background: linear-gradient(to right, #d92626, #d9d926, #26d926, #26d9d9, #2626d9, #d926d9, #d92626);
+}
+.hue-editor input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 17px; height: 17px; border-radius: 50%; border: 2px solid var(--skin-text); background: var(--skin-input); cursor: pointer; }
+.hue-editor input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--skin-text); background: var(--skin-input); cursor: pointer; }
+.hue-editor input[type="range"]:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 4px; }
+.hue-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 0 8px; }
+.hue-actions button { text-align: center; }
+.hue-palette-stops { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; padding: 6px 8px; }
+.hue-palette-stops input[type="color"] { width: 100%; min-width: 0; height: 32px; padding: 3px; border: 1px solid var(--skin-border); border-radius: 4px; cursor: pointer; }
+.hue-palette-stops input:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 2px; }
+.hue-status { margin: 5px 8px; font-size: 11px; line-height: 1.4; color: var(--skin-text); }
+.hue-status:empty { display: none; }
+.panel-hue .hue-reset { margin-inline: 8px; width: calc(100% - 16px); }
+@media (forced-colors: active) {
+  .head .font-select { appearance: auto; -webkit-appearance: auto; }
+  .head .font-select::after { display: none; }
+  .tile[data-panel-hue] { --skin-accent: Highlight; border-color: CanvasText; }
+}
+.hue-history, .bulk-history { display: inline-flex; gap: 4px; }
+.hue-history button, .bulk-history button { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 4px; }
+.hue-swatch { display: block; width: 100%; height: 28px; border: 1px solid var(--skin-muted); border-radius: 5px; cursor: pointer; }
+.hue-swatch:hover { outline: 2px solid var(--skin-text); outline-offset: 1px; }
+.bulk-panel-controls { position: fixed; z-index: 10000; bottom: 18px; left: 50%; transform: translateX(-50%); width: min(380px, calc(100vw - 24px)); box-sizing: border-box; background: var(--skin-tile); color: var(--skin-text); border: 1px solid var(--skin-border); border-radius: 10px; box-shadow: 0 8px 32px #0005; margin: 0; padding: 10px; max-height: 45dvh; overflow: auto; }
+.bulk-panel-controls[hidden] { display: none; }
+.bulk-heading, .bulk-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bulk-heading { margin-bottom: 8px; font-size: 13px; }
+.bulk-panel-controls button, .bulk-panel-controls select, .bulk-panel-controls input[type="number"] { color: var(--skin-text); background-color: var(--skin-input); border: 1px solid var(--skin-border); border-radius: 4px; }
+.bulk-panel-controls select { width: 100%; height: 30px; margin: 4px 0; }
+.bulk-panel-controls label { font-size: 12px; }
+.bulk-panel-controls input[type="number"] { width: 58px; height: 28px; }
+.bulk-swatches { display: flex; gap: 6px; padding: 5px 0; }
+.bulk-panel-controls .hue-editor { padding: 9px 0; grid-template-columns: 1fr; }
+.bulk-panel-controls button:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 2px; }
+.panel-hue > .bulk-swatches { margin: 0 8px; }
+.panel-hue .hue-swatch { padding: 0; min-height: 28px; }
+/* Keep navigation reachable; open settings take priority over the floating selection tools. */
+body:has(.toolbar .command-popover:not([hidden])) .bulk-panel-controls,
+body:has(.panel-menu:popover-open) .bulk-panel-controls,
+body:has(.mobile-sheet:not([hidden])) .bulk-panel-controls { display: none; }
+@media (max-width: 760px), (max-width: 1000px) and (pointer: coarse) {
+  .bulk-panel-controls { bottom: calc(var(--mobile-dock, 64px) + 10px); }
+}
+.panel-hue > .hue-history { padding: 4px 8px; }
+/* Hue controls share one compact, skin-aware surface and a consistent control rhythm. */
+#panelHues { padding: 8px 0; }
+#panelHues > summary { padding: 6px 8px 10px; font-size: 12px; letter-spacing: .01em; }
+.hue-card { margin: 0 4px; padding: 12px; border: 1px solid var(--skin-border); border-radius: 8px; background: color-mix(in srgb, var(--skin-input) 42%, transparent); }
+#panelHues .hue-card label { padding: 0; margin: 0; min-height: 0; font-size: 11px; font-weight: 500; color: var(--skin-muted); }
+#panelHues .hue-card select { height: 30px; min-height: 30px; max-width: none; font-size: 12px; border-radius: 5px; padding: 4px 8px; }
+#panelHues .hue-scope-row { display: grid; grid-template-columns: 48px minmax(0,1fr); align-items: center; gap: 8px; }
+#panelHues .hue-scope-row select { width: 100%; }
+#panelHues .hue-palette-editor { border: 0; border-top: 1px solid var(--skin-border); margin: 12px 0 0; padding-top: 10px; }
+#panelHues .hue-palette-editor > summary { padding: 0 0 8px; font-size: 11px; font-weight: 600; list-style: none; }
+#panelHues .hue-palette-editor > summary::-webkit-details-marker { display: none; }
+#panelHues .hue-palette-editor > summary::after { content: '⌄'; float: right; color: var(--skin-muted); }
+#panelHues .hue-preset-row { display: block; }
+#panelHues #huePreset { width: 100%; }
+.hue-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+#panelHues .hue-palette-stops { padding: 10px 0 8px; gap: 6px; }
+.hue-color-cell { position: relative; min-width: 0; }
+#panelHues .hue-color-cell .hue-swatch { height: 48px; min-height: 48px; margin: 0; padding: 0; border: 1px solid #ffffff30; border-radius: 6px; box-shadow: inset 0 0 0 1px #0000000a; }
+.hue-color-edit { position: absolute; right: 3px; bottom: 3px; display: grid !important; place-items: center; width: 20px; height: 20px; border-radius: 4px; background: #101820a8; color: #fff !important; cursor: pointer; overflow: hidden; }
+#panelHues .hue-color-edit input[type="color"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; padding: 0; margin: 0; cursor: pointer; }
+.hue-color-edit:focus-within { outline: 2px solid var(--skin-text); outline-offset: 2px; }
+.hue-palette-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#panelHues .hue-palette-toolbar label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+#panelHues #huePattern { width: 100%; min-width: 0; max-width: 110px; font-size: 11px; }
+.hue-stop-actions { display: flex; gap: 4px; }
+#panelHues .hue-stop-actions button { width: 26px; height: 28px; min-height: 28px; margin: 0; padding: 0; text-align: center; font-size: 16px; border-radius: 5px; }
+.hue-tune { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--skin-border); }
+#panelHues .hue-tune > label { display: block; margin-bottom: 6px; }
+#panelHues .hue-editor { padding: 0; grid-template-columns: minmax(0,1fr) 52px; gap: 12px; }
+.hue-editor input[type="range"] { height: 6px; border: 0; }
+#panelHues .hue-editor input[type="number"] { font-size: 12px; padding: 4px 5px; border-radius: 5px; }
+#panelHues .hue-actions { display: flex; justify-content: space-between; align-items: center; padding: 12px 0 0; gap: 8px; }
+#panelHues .hue-actions button { margin: 0; min-height: 28px; height: 28px; border-radius: 5px; font-size: 11px; }
+#panelHues .hue-history button { width: 28px; padding: 4px; }
+#panelHues #resetHues { width: auto; padding: 4px 8px; border-color: transparent; background: transparent; color: var(--skin-muted); }
+#panelHues #resetHues:hover { color: var(--skin-text); border-color: var(--skin-border); }
+#panelHues .hue-status { font-size: 10px; margin: 7px 8px 0; color: var(--skin-muted); }
+.bulk-panel-controls { padding: 14px; border-radius: 12px; }
+.bulk-heading { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--skin-border); }
+.bulk-heading strong { font-size: 12px; font-weight: 600; }
+#bulkPanelCount { color: var(--skin-muted); font-weight: 400; }
+#bulkClear { width: 26px; height: 26px; font-size: 16px; }
+.bulk-panel-controls label { font-size: 11px; color: var(--skin-muted); }
+.bulk-panel-controls select { border-radius: 5px; margin-top: 6px; font-size: 12px; }
+.bulk-swatches .hue-swatch { height: 36px; border-color: #ffffff30; border-radius: 5px; }
+.bulk-footer { border-top: 1px solid var(--skin-border); padding-top: 10px; margin-top: 4px; }
+.panel-hue > .bulk-swatches { margin: 4px 8px 8px; }
+.panel-hue .hue-reset { font-size: 11px; background: transparent; border-color: transparent; }
+/* One editing surface: target and history, palette, then precision adjustment. */
+#panelHues .hue-card { border: 0; border-radius: 0; margin: 0; padding: 4px 8px 0; background: transparent; }
+.hue-target-bar { display: flex; align-items: center; gap: 10px; }
+#panelHues .hue-target-bar .hue-scope-row { display: block; flex: 1; min-width: 0; }
+#panelHues .hue-target-bar .hue-history { flex: 0 0 auto; gap: 2px; }
+#panelHues .hue-target-bar button { margin: 0; width: 28px; height: 28px; min-height: 28px; border: 0; background: transparent; border-radius: 5px; }
+#panelHues .hue-target-bar button:hover:not(:disabled) { background: var(--skin-input); }
+[data-hue-history]:disabled { opacity: .3; cursor: default; }
+#panelHues .hue-palette-editor { border: 0; padding: 0; margin-top: 16px; }
+#panelHues .hue-preset-row > span { display: block; margin-bottom: 6px; }
+#panelHues .hue-color-cell .hue-swatch { height: 52px; }
+#panelHues .hue-palette-toolbar { margin-top: 2px; }
+#panelHues .hue-tune { margin-top: 14px; padding-top: 12px; }
+#panelHues .hue-actions { justify-content: flex-end; padding-top: 8px; }
+#panelHues .hue-actions #resetHues { padding-right: 0; }
+.bulk-header-actions, .panel-hue-heading { display: flex; align-items: center; gap: 8px; }
+.panel-hue-heading { justify-content: space-between; padding-right: 8px; }
+.panel-hue-heading h2 { margin: 0; }
+.panel-hue-heading .hue-history { padding: 0; }
+.bulk-header-actions .bulk-history { gap: 2px; }
+.bulk-header-actions .bulk-history button, .panel-hue-heading .hue-history button { width: 28px; height: 28px; border: 0; background: transparent; }

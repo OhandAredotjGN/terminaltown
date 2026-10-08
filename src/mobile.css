@@ -1,0 +1,223 @@
+/* TT-MOBILE-TABS-20260910: shared sessions, independent phone presentation. */
+.mobile-ui, .mobile-panel-keys, .mobile-panel-layout { display: none; }
+@media (max-width: 760px), (max-width: 1000px) and (pointer: coarse) { .mobile-panel-keys { display: grid; } .mobile-panel-layout { display: block; } }
+@media (max-width: 760px), (max-width: 1000px) and (pointer: coarse) {
+  :root {
+    --mobile-vh: 100dvh;
+    --mobile-top: 0px;
+    --mobile-safe-top: env(safe-area-inset-top, 0px);
+    --mobile-safe-right: env(safe-area-inset-right, 0px);
+    --mobile-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --mobile-safe-left: env(safe-area-inset-left, 0px);
+    /* visualViewport moves when the keyboard opens; env() supplies the
+       hardware inset in standalone iOS without double-counting either one. */
+    --mobile-frame-top: max(var(--mobile-top), var(--mobile-safe-top));
+    --mobile-frame-height: calc(var(--mobile-vh) - (var(--mobile-frame-top) - var(--mobile-top)));
+    --mobile-dock-bar: 52px;
+    --mobile-dock: calc(var(--mobile-dock-bar) + var(--mobile-safe-bottom));
+  }
+  body { --page-top-inset: 0px; }
+  html, body { height: 100%; overscroll-behavior: none; }
+  .page { top: var(--mobile-frame-top); bottom: auto; height: calc(var(--mobile-frame-height) - var(--mobile-dock)); }
+  .toolbar, .toolbar.collapsed { height: 32px; min-height: 32px; padding: 0 max(8px,var(--mobile-safe-right)) 0 max(8px,var(--mobile-safe-left)); gap: 4px; }
+  .toolbar > :not(.board-control):not(.status):not(#muteChimes), .toolbar.collapsed > :not(.board-control):not(.status):not(#muteChimes) { display: none !important; }
+  .toolbar .board-control, .toolbar.collapsed .board-control { display: flex; flex: 1; min-width: 0; }
+  .toolbar #boardMenuButton { height: 30px; max-width: 100%; }
+  .toolbar .board-label { max-width: none; }
+  .toolbar .status { display: block; flex: 0 1 auto; font-size: 10px; }
+  .board, .board.compact { padding-inline: max(6px,var(--mobile-safe-left)) max(6px,var(--mobile-safe-right)); grid-template-columns: repeat(var(--mobile-columns,1),minmax(0,1fr)); grid-template-rows: repeat(var(--mobile-rows,2), minmax(0,1fr)); grid-auto-rows: minmax(0,1fr); gap: 6px; padding-block: 6px; overflow: hidden; }
+
+  .board > .tile { display: none; min-height: 0; }
+  .board > .tile.mobile-visible { display: grid; grid-column: auto !important; grid-row: auto !important; }
+  .tile { --tile-head-height: 28px; grid-template-rows: 28px minmax(0,1fr) var(--prompt-height,32px); }
+  .tile::before, .tile::after { bottom: var(--prompt-height,32px); }
+  .head { height: 28px; padding: 0 3px 0 6px; gap: 2px; }
+  .head .meta { display: none; }
+  #metaStatus { display: block; position: absolute; top: 28px; left: 0; right: 0; max-width: none; height: 18px; padding: 2px 6px; background: var(--skin-head); z-index: 3; }
+  .meta-terminal .meta-panel-surface { grid-template-rows: 46px minmax(0,1fr) var(--prompt-height,32px); }
+  .meta-terminal .meta-panel-surface .head { height: 46px; align-items: flex-start; }
+  .meta-terminal .head-main { height: 28px; }
+  .head .name { font-size: 11px; }
+  .head-actions { gap: 0; }
+  .head button { min-width: 28px; height: 28px; padding: 0 6px; }
+  .tile > form { min-height: 32px; height: var(--prompt-height,32px); grid-template-columns: minmax(0,1fr) 40px; background: var(--skin-input); }
+  .tile form input, .tile form textarea, .tile form button { min-height: 30px; font-size: 12px; }
+  /* Native 16px inputs prevent automatic iOS focus zoom. */
+  .tile form .prompt-input { font-size: 16px; line-height: 20px; width: 100%; }
+  .tile form button { min-width: 40px; padding: 0 6px; }
+  .tile pre { font-size: 12px; line-height: 16px; touch-action: pan-x pan-y; overscroll-behavior: auto; -webkit-overflow-scrolling: touch; }
+  .board.mobile-four .head-actions > :not(.tools-toggle) { display: none; }
+  .board.mobile-four .idx { font-size: 10px; }
+  .board.mobile-four .head .name { font-size: 11px; }
+  .resize-edge { display: none; }
+  .mobile-ui:not([hidden]) { display: block; }
+  .mobile-ui, .panel-menu { color: var(--skin-text); }
+  .mobile-ui button, .mobile-ui select, .mobile-ui summary, .board-picker button, .holding-drawer button, .panel-menu button, .panel-menu select { min-height: 30px; }
+  .mobile-ui button, .mobile-ui select, .mobile-ui summary { font: inherit; font-size: 11px; }
+  .mobile-ui button { color: var(--skin-text); background: var(--skin-head); border: 1px solid var(--skin-border); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+  .mobile-ui button:hover, .mobile-ui button[aria-pressed="true"] { outline: 2px solid var(--skin-accent); outline-offset: -2px; }
+  .mobile-ui :focus-visible { outline: 2px solid var(--skin-accent); outline-offset: -3px; }
+  .mobile-ui h2 { font-size: 12px; margin: 16px 0 8px; }
+  .mobile-ui p { color: var(--skin-text); }
+  .mobile-dock-shell:not([hidden]) { position: fixed; z-index: 37; top: calc(var(--mobile-frame-top) + var(--mobile-frame-height) - var(--mobile-dock)); left: 0; right: 0; height: var(--mobile-dock); pointer-events: none; background: color-mix(in srgb,var(--skin-head) 62%,var(--skin-board)); box-shadow: inset 0 2px 0 color-mix(in srgb,var(--skin-accent) 32%,transparent), inset 0 12px 22px color-mix(in srgb,var(--skin-border) 10%,transparent), 0 -8px 24px var(--skin-shadow); }
+  .mobile-dock-shell:not([hidden])::after { content: ""; position: absolute; inset: 5px 5px 6px; border-radius: 6px 6px 30px 30px; background: color-mix(in srgb,var(--skin-board) 72%,var(--skin-head)); box-shadow: inset 0 -12px 22px color-mix(in srgb,var(--skin-page) 22%,transparent); }
+  .mobile-dock:not([hidden]) { position: fixed; z-index: 40; top: calc(var(--mobile-frame-top) + var(--mobile-frame-height) - var(--mobile-dock) + 4px); left: max(8px,var(--mobile-safe-left)); right: max(8px,var(--mobile-safe-right)); height: 44px; display: flex; align-items: stretch; padding: 0; box-sizing: border-box; background: color-mix(in srgb,var(--skin-head) 78%,var(--skin-board)); border: 0; border-radius: 18px; box-shadow: inset 0 0 0 1px var(--skin-border), 0 3px 10px var(--skin-shadow); overflow: hidden; }
+  .mobile-dock button { display: flex; align-items: center; justify-content: center; gap: 5px; height: 32px; min-width: 82px; padding: 3px 8px; font-size: 10px; }
+  .mobile-dock > button { flex: 1 1 0; width: 0; min-width: 0; height: 100%; flex-direction: column; gap: 1px; padding: 3px 4px 2px; color: var(--skin-muted); background: transparent; border: 0; border-left: 1px solid var(--skin-border); border-radius: 0; font-size: 11px; line-height: 12px; }
+  #mobileNavigateButton { border-left: 0; }
+  .mobile-dock > button[aria-expanded="true"], #mobileOverviewButton[aria-pressed="true"] { color: var(--skin-page); background: var(--skin-accent); border-color: var(--skin-accent); outline: 0; box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--skin-text) 28%,transparent); }
+  body[data-mobile-dock-shape="square"] .mobile-dock:not([hidden]),
+  body[data-mobile-dock-shape="square"] #mobileNavigateButton,
+  body[data-mobile-dock-shape="square"] #mobileOverviewButton,
+  body[data-mobile-dock-shape="square"] #mobileControlsButton { border-radius: 0; }
+  .mobile-dock > .mobile-pager { flex: 1 1 0; width: 0; min-width: 0; height: 100%; gap: 0; border-left: 1px solid var(--skin-border); }
+  .mobile-dock > button, .mobile-dock > .mobile-pager { flex: 1 1 33.333%; box-sizing: border-box; }
+  .mobile-dock > .mobile-pager button { flex: 1 1 0; height: 100%; min-width: 0; border: 0; border-left: 1px solid var(--skin-border); border-radius: 0; }
+  .mobile-dock > .mobile-pager button:first-child { border-left: 0; }
+  .mobile-calibration { position: fixed; z-index: 10000; top: var(--mobile-frame-top); left: 0; width: 100vw; height: var(--mobile-frame-height); pointer-events: none; color: #fff; background-image: repeating-linear-gradient(to right, #00e5ff55 0 1px, transparent 1px 10px), repeating-linear-gradient(to bottom, #00e5ff55 0 1px, transparent 1px 10px), repeating-linear-gradient(to right, #ffe600aa 0 2px, transparent 2px 50px), repeating-linear-gradient(to bottom, #ffe600aa 0 2px, transparent 2px 50px); }
+  .mobile-calibration-readout { position: absolute; top: 4px; left: 4px; max-width: calc(100% - 8px); padding: 4px 6px; color: #fff; background: #000d; border: 1px solid #fff; border-radius: 4px; font: 10px/14px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: normal; }
+  .mobile-calibration-safe-bottom { position: absolute; left: 0; right: 0; bottom: calc(var(--mobile-safe-bottom) - 1px); height: 1px; background: #ff2f6d; box-shadow: 0 0 0 1px #000; }
+  .mobile-calibration-safe-left { position: absolute; top: 0; bottom: 0; left: var(--mobile-safe-left); width: 1px; background: #ff2f6d; }
+  .mobile-calibration-safe-right { position: absolute; top: 0; bottom: 0; right: var(--mobile-safe-right); width: 1px; background: #ff2f6d; }
+  .mobile-calibration-center-x { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: #7cff00; }
+  .mobile-calibration-center-y { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: #7cff00; }
+  body.mobile-calibration-enabled .mobile-dock { outline: 2px solid #ff2f6d; outline-offset: -2px; }
+  .mobile-dock > button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+  .mobile-dock > button > span:last-child { font-size: 11px; line-height: 12px; }
+  #mobileAttention { display: grid; place-items: center; width: 19px; height: 19px; font-size: 15px; line-height: 19px; }
+  .mobile-sheet:not([hidden]) { position: fixed; z-index: 39; left: max(6px,var(--mobile-safe-left)); right: max(6px,var(--mobile-safe-right)); bottom: calc(100% - var(--mobile-frame-top) - var(--mobile-frame-height) + var(--mobile-dock)); top: auto; max-height: calc(var(--mobile-frame-height) - var(--mobile-dock) - 44px); display: flex; flex-direction: column; border: 1px solid var(--skin-border); border-radius: 14px 14px 0 0; background: var(--skin-board); box-shadow: 0 -8px 32px #0006; overflow: hidden; }
+  .mobile-sheet > header { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; flex-shrink: 0; border-bottom: 1px solid var(--skin-border); }
+  .mobile-sheet > header button { min-width: 30px; }
+  .mobile-sheet-body { padding: 8px; overflow: auto; overscroll-behavior: contain; }
+  .mobile-shade:not([hidden]) { position: fixed; z-index: 38; inset: 0; background: #0007; }
+  .mobile-quick-boards { display: flex; gap: 6px; overflow-x: auto; padding: 6px 1px; overscroll-behavior-x: contain; }
+  .mobile-quick-boards:empty { display: none; }
+  .mobile-quick-boards button { flex: 0 0 auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-wide { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin-bottom: 6px; }
+  #mobileBoardName { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+  .mobile-segments, .mobile-step { display: flex; gap: 6px; margin: 8px 0; }
+  .mobile-segments > *, .mobile-step > * { flex: 1; min-width: 0; }
+  .mobile-control-shortcuts > button { min-height: 52px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; white-space: nowrap; }
+  .mobile-control-shortcuts > button > span:first-child { font-size: 15px; line-height: 16px; }
+  .mobile-control-shortcuts > button > span:last-child { line-height: 14px; }
+  .mobile-step button { padding: 6px; font-size: 12px; }
+  .mobile-hint { font-size: 11px; margin: 8px 0; }
+  .mobile-panel-list { display: grid; gap: 5px; }
+  .mobile-panel-row { display: flex; gap: 6px; }
+  .mobile-panel-open { flex: 1; min-width: 0; text-align: left; display: grid; grid-template-columns: 26px minmax(0,1fr); gap: 1px 6px; }
+  .mobile-panel-open strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-panel-open small { grid-column: 2; font-size: 11px; }
+  .mobile-ui details { margin: 8px 0; border-top: 1px solid var(--skin-border); }
+  .mobile-ui summary { padding: 7px 2px; box-sizing: border-box; cursor: pointer; }
+  .mobile-sheet .command-popover { display: block; position: static; width: 100%; max-width: none; max-height: none; padding: 0; border: 0; box-shadow: none; background: transparent; }
+  .mobile-sheet .command-popover h2 { display: none; }
+  .mobile-sheet .command-popover button { margin: 4px 0; }
+  .mobile-sheet .command-popover select { font-size: 12px; min-height: 30px; max-width: 62%; }
+  .mobile-sheet .command-popover label { min-height: 34px; }
+  .mobile-overview:not([hidden]) { min-height: 0; overflow: auto; padding: 8px; background: var(--skin-board); }
+  .mobile-overview-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  #mobileSummary { font-size: 10px; text-align: right; }
+  .mobile-overview-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; }
+  .mobile-overview-card { min-height: 88px; display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 8px !important; overflow: hidden; }
+  .mobile-overview-card strong { font-size: 11px; line-height: 14px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .mobile-overview-card small { font-size: 10px; }
+  .mobile-overview-card .mobile-snippet { font-size: 10px; line-height: 13px; max-height: 26px; overflow: hidden; overflow-wrap: anywhere; }
+  .mobile-overview-card[data-state="Waiting"], .mobile-overview-card[data-state="Missing"] { border: 2px solid var(--skin-accent); }
+  .mobile-overview-card[data-state="Working"] { border-left: 3px solid var(--skin-accent); }
+  body.mobile-overview-open .board { display: none; }
+  .board-picker-backdrop.visible { z-index: 41; padding: 0 max(6px,var(--mobile-safe-right)) 0 max(6px,var(--mobile-safe-left)); top: calc(var(--mobile-frame-top) + 6px); bottom: auto; height: calc(var(--mobile-frame-height) - var(--mobile-dock) - 12px); align-items: flex-end; }
+  .board-picker { width: 100%; max-height: 100%; }
+  .board-picker input, .board-picker select, .holding-drawer input, .holding-drawer select { font-size: 12px; min-height: 30px; }
+  .board-picker-footer { overflow: auto; }
+  .board-management { flex-wrap: wrap; }
+  .panel-menu { max-height: calc(var(--mobile-frame-height) - var(--mobile-dock) - 12px); width: min(340px,calc(100vw - 12px)); overscroll-behavior: contain; }
+  .panel-menu button { font-size: 11px; }
+  .panel-menu summary { min-height: 30px; padding: 7px 8px; cursor: pointer; }
+  .panel-menu select { font-size: 12px; max-width: 65%; }
+  .meta-terminal.side, .meta-terminal.bottom { z-index: 30; top: calc(var(--mobile-frame-top) + 32px); bottom: auto; left: var(--mobile-safe-left); right: var(--mobile-safe-right); width: auto; height: calc(var(--mobile-frame-height) - var(--mobile-dock) - 32px); }
+  .meta-terminal-inner { padding: 6px; }
+  .holding-drawer { z-index: 31; top: calc(var(--mobile-frame-top) + 32px); bottom: auto; height: calc(var(--mobile-frame-height) - var(--mobile-dock) - 32px); width: calc(100% - var(--mobile-safe-left) - var(--mobile-safe-right)); max-width: none; }
+  .holding-tab { display: none; }
+  .holding-tools { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .holding-tools input { grid-column: 1 / -1; }
+  .kart-layer { display: none; }
+  @media (orientation: landscape) {
+
+    .mobile-overview-grid { grid-template-columns: repeat(6,minmax(0,1fr)); }
+    .mobile-sheet { max-width: 560px; }
+    #mobileControls { left: auto; width: min(560px,calc(100% - 12px)); }
+  }
+}
+
+@media (max-width: 760px), (max-width: 1000px) and (pointer: coarse) {
+  .board.mobile-all, .board.mobile-all.compact { display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; gap: 5px; scroll-padding-block: 5px; -webkit-overflow-scrolling: touch; }
+  .board.mobile-all > .tile.mobile-visible { flex: 0 0 var(--mobile-panel-height,240px); width: 100%; min-height: var(--mobile-panel-height,240px); }
+  .board.mobile-all > .tile.empty { flex-basis: 96px; min-height: 96px; }
+  body.mobile-overview-open .board.mobile-all { display: none; }
+  .board.mobile-all .head { touch-action: pan-y; }
+}
+
+@media (max-width: 760px), (max-width: 1000px) and (pointer: coarse) {
+  .mobile-setting { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; }
+  .mobile-setting[hidden], .mobile-dock > [hidden] { display: none !important; }
+  #mobilePanelHeight { width: 100%; min-height: 28px; margin: 0; padding: 0; accent-color: var(--skin-accent); }
+  #mobilePanelsPerTab { min-width: 64px; color: var(--skin-input-text); background: var(--skin-input); border: 1px solid var(--skin-border); }
+  .mobile-pager:not([hidden]) { display: flex; align-items: center; gap: 2px; }
+  .mobile-dock .mobile-pager button { min-width: 28px; padding-inline: 5px; }
+  #mobileTabPosition { min-width: 42px; font-variant-numeric: tabular-nums; }
+  .mobile-pager button:disabled { opacity: 1; color: var(--skin-muted); cursor: default; }
+}
+
+.ios-input-wrapper { display: contents; }
+
+/* iOS zooms keyboard-editable controls whose rendered type is below 16px.
+   Text fields therefore stay at a real, untransformed 16px. Native dropdowns,
+   which do not open the keyboard, retain the compact scaled treatment. User
+   pinch zoom remains enabled. */
+@media (hover: none) and (pointer: coarse) {
+  .ios-input-wrapper {
+    --ios-input-scale: .875;
+    --ios-input-visual-width: 120px;
+    --ios-input-visual-height: 30px;
+    display: inline-block;
+    flex: 0 1 auto;
+    position: relative;
+    width: var(--ios-input-visual-width);
+    height: var(--ios-input-visual-height);
+    min-width: 0;
+    vertical-align: middle;
+    overflow: hidden;
+    border-radius: 4px;
+  }
+  .ios-input-wrapper:focus-within { outline: 2px solid var(--skin-accent); outline-offset: -2px; }
+  .ios-input-wrapper.ios-input-fill { display: block; width: 100%; }
+  .ios-input-wrapper > input,
+  .ios-input-wrapper > textarea {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: 100% !important;
+    max-height: none !important;
+    margin: 0 !important;
+    font-size: max(var(--ios-keyboard-font-size, 16px), 1rem) !important;
+    line-height: 20px !important;
+    transform: none !important;
+  }
+  .ios-input-wrapper > select {
+    box-sizing: border-box !important;
+    width: calc(100% / var(--ios-input-scale)) !important;
+    max-width: none !important;
+    height: calc(100% / var(--ios-input-scale)) !important;
+    max-height: none !important;
+    margin: 0 !important;
+    font-size: max(16px, 1rem) !important;
+    transform: scale(var(--ios-input-scale));
+    transform-origin: left top;
+  }
+  .ios-input-wrapper > input:focus-visible,
+  .ios-input-wrapper > textarea:focus-visible,
+  .ios-input-wrapper > select:focus-visible { outline: 0 !important; }
+  input, textarea, select, [contenteditable="true"] {
+    font-size: max(16px, 1rem) !important;
+  }
+}

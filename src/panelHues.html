@@ -1,0 +1,17 @@
+<details id="panelHues" class="hue-settings">
+  <summary>Panel hues</summary>
+  <div class="hue-card">
+    <div class="hue-target-bar"><label for="hueScope" class="hue-scope-row"><span class="hue-visually-hidden">Apply to</span><select id="hueScope"><option value="all">Whole board</option><option value="selected">Selected (0)</option></select></label><span class="hue-history"></span></div>
+    <div class="hue-palette-editor">
+      <label for="huePreset" class="hue-preset-row"><span>Palette</span><select id="huePreset"><option value="coast">Coast</option><option value="dusk">Dusk</option><option value="orchard">Orchard</option><option value="custom">Custom</option></select></label>
+      <div id="huePaletteStops" class="hue-palette-stops" aria-label="Palette colors"></div>
+      <div class="hue-palette-toolbar">
+        <label for="huePattern">Arrange<select id="huePattern"><option value="columns">Column</option><option value="rows">Row</option><option value="panels">Panel</option></select></label>
+        <div class="hue-stop-actions"><button type="button" id="removeHueStop" aria-label="Remove last palette color" title="Remove last color">−</button><button type="button" id="addHueStop" aria-label="Add palette color" title="Add color">+</button></div>
+      </div>
+    </div>
+    <div class="hue-tune"><label for="hueRange">Hue</label><div class="hue-editor"><input id="hueRange" type="range" min="0" max="359" value="210" aria-label="Hue"><input id="hueValue" type="number" min="0" max="359" value="210" aria-label="Hue in degrees"></div></div>
+    <div class="hue-actions"><button type="button" id="resetHues">Reset to skin</button></div>
+  </div>
+  <p id="hueStatus" class="hue-status" role="status" aria-live="polite"></p>
+</details>

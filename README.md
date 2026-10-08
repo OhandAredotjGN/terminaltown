@@ -10,6 +10,12 @@ TerminalTown renders tmux snapshots in a single browser board. Arrange sessions 
 
 The public edition includes an interactive simulation so the board can be explored without launching an agent or exposing a terminal.
 
+This repository is kept as a public-safe edition of the fuller local TerminalTown
+application. Public updates are prepared on a reviewable branch from the local
+renderer, while internal VS Code, JARGAN, host-layout, runtime-evidence, and
+session data remain outside this repository. Host-specific paths and privileged
+agent defaults are supplied only through explicit environment configuration.
+
 ## What it does
 
 - Resizable session grid and multiple boards.
@@ -41,7 +47,7 @@ Live mode controls real local sessions, including sending commands and ending se
 
 ## How it works
 
-`src/aiGrid.js` contains the original board renderer and tmux integration. `src/demo.js` replaces host operations with an in-memory simulation. `scripts/terminaltown-browser.js` serves the board with host/origin checks and JSON-only control requests.
+`src/aiGrid.js` contains the shared board renderer and optional tmux integration. `src/demo.js` replaces host operations with an in-memory simulation. `scripts/terminaltown-browser.js` serves the board with host/origin checks and JSON-only control requests.
 
 ## Scope and limitations
 

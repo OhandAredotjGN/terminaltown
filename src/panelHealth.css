@@ -1,0 +1,25 @@
+.panel-health-button { display:inline-flex; align-items:center; gap:5px; flex:none; min-width:28px; height:26px; padding:2px 6px; font:inherit; color:inherit; background:transparent; border:1px solid currentColor; border-radius:5px; }
+.panel-health-dot { width:7px; height:7px; border-radius:50%; background:#83909e; flex:none; }
+.panel-health-button[data-state="healthy"] .panel-health-dot { background:#54bc86; }
+.panel-health-button[data-state="degraded"] .panel-health-dot { background:#f3ba55; }
+.panel-health-button[data-state="needs-attention"] .panel-health-dot { background:#ff7373; }
+.tile[data-health="needs-attention"], .tile[data-health="degraded"] { box-shadow:inset 0 0 0 2px #cd8a35; }
+.panel-health-dialog { position:fixed; inset:42px 12px auto auto; margin:0; padding:14px; width:360px; max-width:calc(100vw - 24px); max-height:65vh; overflow:auto; box-sizing:border-box; color:#e8edf4; background:#19212c; border:1px solid #697789; border-radius:9px; font:12px/1.45 system-ui,sans-serif; }
+.panel-health-dialog::backdrop { background:rgba(0,0,0,.16); }
+.panel-health-dialog header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.panel-health-dialog h2 { font-size:15px; margin:0; }
+.panel-health-dialog button { color:#e8edf4; background:#2a3544; border:1px solid #697789; border-radius:5px; min-height:32px; padding:4px 9px; }
+.panel-health-dialog p { margin:8px 0; }
+.panel-health-dialog ol { list-style:none; margin:0; padding:0; }
+.panel-health-dialog li { border-top:1px solid #475569; padding:9px 0; }
+.panel-health-dialog li strong { display:block; }
+.panel-health-dialog .health-meta { color:#b9c8da; font-size:11px; }
+.panel-health-dialog a { color:#99c9ff; }
+ .health-mobile-status { display:none; }
+#mobileHealthHost .panel-health-button { display:flex; width:100%; min-height:44px; height:auto; padding:8px 10px; gap:8px; color:var(--skin-text); background:var(--skin-head); border:1px solid var(--skin-border); border-radius:6px; font:inherit; text-align:left; }
+#mobileHealthHost .health-mobile-status { display:block; margin-left:auto; color:var(--skin-muted); font-size:11px; }
+#mobileControlsButton { position:relative; }
+#mobileControlsButton[data-health="needs-attention"]::after, #mobileControlsButton[data-health="degraded"]::after, #mobileControlsButton[data-health="unknown"]::after { content:""; position:absolute; top:5px; left:calc(50% + 9px); width:6px; height:6px; border-radius:50%; background:#ff7373; box-shadow:0 0 0 2px var(--skin-head); }
+#mobileControlsButton[data-health="degraded"]::after { background:#f3ba55; }
+#mobileControlsButton[data-health="unknown"]::after { background:#83909e; }
+@media (max-width:760px), (max-width:1000px) and (pointer:coarse) { .panel-health-dialog { inset:48px 8px auto auto; max-width:calc(100vw - 16px); max-height:60vh; } .panel-health-dialog button { min-height:44px; min-width:44px; } }
