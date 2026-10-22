@@ -23,7 +23,7 @@ const TMUX_BIN = (() => {
     process.env.SUMMONER_TMUX_BIN,
     '/usr/local/bin/tmux',
     '/opt/homebrew/bin/tmux',
-    path.join(os.homedir(), 'JARGAN', '.homebrew', 'bin', 'tmux'),
+    path.join(os.homedir(), '.local', 'bin', 'tmux'),
     '/usr/bin/tmux',
   ].filter(Boolean);
   for (const c of candidates) {
@@ -58,8 +58,8 @@ let panelRotationRunning = false;
 const SUMMON_DIR = path.join(os.homedir(), '.vscode-summon');
 const SUMMON_QUEUE = path.join(SUMMON_DIR, 'queue.jsonl');
 const TITLES_FILE = path.join(SUMMON_DIR, 'titles.json');
-const JARGAN_ROOT = process.env.TERMINALTOWN_PROJECT_ROOT || process.cwd();
-const TERMINALS_JSON = process.env.TERMINALTOWN_TERMINALS_FILE || path.join(JARGAN_ROOT, '.vscode', 'terminals.json');
+const PROJECT_ROOT = process.env.TERMINALTOWN_PROJECT_ROOT || process.cwd();
+const TERMINALS_JSON = process.env.TERMINALTOWN_TERMINALS_FILE || path.join(PROJECT_ROOT, '.vscode', 'terminals.json');
 const EXTERNAL_TERMINAL_URL = process.env.TERMINALTOWN_EXTERNAL_TERMINAL_URL || process.env.AI_GRID_EXTERNAL_TERMINAL_URL || '';
 const SLOT_COUNT = 12;
 const DEFAULT_BOARD_ID = 'default';
@@ -1533,11 +1533,10 @@ function kebab(s) {
     .slice(0, 48) || 'session';
 }
 
-function normalizeJarganPath(p) {
+function normalizeProjectPath(p) {
   const value = String(p || '').trim();
-  if (!value) return JARGAN_ROOT;
-  if (/^\/Users\/[^/]+\/JARGAN(?:\/|$)/.test(value)) return value.replace(/^\/Users\/[^/]+\/JARGAN/, JARGAN_ROOT);
-  return value;
+  if (!value) return PROJECT_ROOT;
+  return value || PROJECT_ROOT;
 }
 
 function parseJsonWithComments(file) {
@@ -1557,7 +1556,7 @@ function presetSessions() {
         let command = ((t.commands || [])[0] || '').trim();
         if (!/claude --/.test(command)) return null;
         let session = '';
-        const wrapped = command.match(/^bash \$HOME\/JARGAN\/scripts\/tmux-attach-and-reap\.sh (\S+) -- (.+)$/);
+        const wrapped = command.match(/^bash (?:\S+\/)?tmux-attach-and-reap\.sh (\S+) -- (.+)$/);
         const tmuxWrapped = command.match(/^tmux new -A -s ([\w.-]+) '(.+)'$/);
         if (wrapped) {
           session = wrapped[1];
@@ -1572,9 +1571,9 @@ function presetSessions() {
         return {
           label: t.name,
           description: session,
-          detail: normalizeJarganPath(t.cwd || JARGAN_ROOT),
+          detail: normalizeProjectPath(t.cwd || PROJECT_ROOT),
           session,
-          cwd: normalizeJarganPath(t.cwd || JARGAN_ROOT),
+          cwd: normalizeProjectPath(t.cwd || PROJECT_ROOT),
           command,
         };
       })
@@ -1643,7 +1642,7 @@ async function createAiSession({ session, cwd, command, initialPrompt, placement
   if (!NAME_RE.test(session)) throw new Error('Session names can use only letters, numbers, dot, underscore, and dash.');
   if (readManifest().sessions[session] || Object.values(readManifest().sessions).some(record => (record.aliases || []).includes(session)) || await exactSessionExists(session)) throw new Error(`${session} already exists; choose a different session name.`);
   const ctx = boardContext(board);
-  const dir = normalizeJarganPath(cwd || JARGAN_ROOT);
+  const dir = normalizeProjectPath(cwd || PROJECT_ROOT);
   if (!fs.existsSync(dir)) throw new Error(`Directory does not exist: ${dir}`);
   const launchCommand = normalizeCodexLaunchCommand(command);
   await tmux(['new-session', '-d', '-s', session, '-c', dir], { timeout: 5000 });
@@ -1697,7 +1696,7 @@ async function createMetaSession({ goal, slot, kind, cwd, board }) {
   const command = sessionKind === 'claude'
     ? 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide'
     : codexFullPermissionCommand();
-  return createAiSession({ session, cwd: String(cwd || JARGAN_ROOT), command, initialPrompt: text, placement: String(requestedSlot), title, board });
+  return createAiSession({ session, cwd: String(cwd || PROJECT_ROOT), command, initialPrompt: text, placement: String(requestedSlot), title, board });
 }
 
 function codexPromptReady(output) {
@@ -2614,7 +2613,7 @@ async function applyPanelRotations(sessions) {
 async function spawnRecoveredSession(name, record, freshCommand = '') {
   if (!NAME_RE.test(name)) throw new Error(`bad session name: ${name}`);
   if (await exactSessionExists(name)) throw new Error(`${name} already exists`);
-  const cwd = normalizeJarganPath(record.cwd || JARGAN_ROOT);
+  const cwd = normalizeProjectPath(record.cwd || PROJECT_ROOT);
   if (!fs.existsSync(cwd)) throw new Error(`Directory does not exist: ${cwd}`);
   let command = String(record.command || '').trim();
   if (freshCommand) {
@@ -2696,7 +2695,7 @@ async function recoverMissingSessions(options = {}) {
       upsertManifestRecord(manifest, name, {
         kind: 'claude',
         title,
-        cwd: liveClaude.cwd || livePane.cwd || (current && current.cwd) || JARGAN_ROOT,
+        cwd: liveClaude.cwd || livePane.cwd || (current && current.cwd) || PROJECT_ROOT,
         command: `claude --dangerously-skip-permissions --resume ${resumeId} --rc --ide`,
         resumeId,
         target: liveClaude.target,
@@ -2711,7 +2710,7 @@ async function recoverMissingSessions(options = {}) {
     const recoveryRecord = current || (SID_RE.test(resumeId) ? {
       kind: 'claude',
       title,
-      cwd: fallbackClaude && fallbackClaude.cwd || JARGAN_ROOT,
+      cwd: fallbackClaude && fallbackClaude.cwd || PROJECT_ROOT,
       resumeId,
       command: `claude --dangerously-skip-permissions --resume ${resumeId} --rc --ide`,
     } : null);
@@ -3604,7 +3603,7 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
     ? choices.find((choice) => choice.kind === forcedKind)
     : await vscode.window.showQuickPick(choices, {
       title: 'New AI Session',
-      placeHolder: 'Choose Claude, Codex, or a JARGAN preset',
+      placeHolder: 'Choose Claude, Codex, or a project preset',
       ignoreFocusOut: true,
       matchOnDescription: true,
       matchOnDetail: true,
@@ -3612,14 +3611,14 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
   if (!source) return null;
 
   let session = source.session || '';
-  let cwd = source.cwd || JARGAN_ROOT;
+  let cwd = source.cwd || PROJECT_ROOT;
   let command = source.command || '';
   let title = source.kind === 'preset' ? source.label : '';
 
   if (source.kind === 'claude') {
     cwd = await vscode.window.showInputBox({
       title: 'Project Directory',
-      value: JARGAN_ROOT,
+      value: PROJECT_ROOT,
       ignoreFocusOut: true,
     });
     if (!cwd) return null;
@@ -3627,7 +3626,7 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
   } else if (source.kind === 'codex') {
     cwd = await vscode.window.showInputBox({
       title: 'Project Directory',
-      value: JARGAN_ROOT,
+      value: PROJECT_ROOT,
       ignoreFocusOut: true,
     });
     if (!cwd) return null;
@@ -7721,7 +7720,7 @@ function browserNewSession(kind = '') {
   const pickedKind = kind || String(prompt('Session type: claude, codex, or shell', 'codex') || '').trim().toLowerCase();
   if (!pickedKind) return;
   const normalizedKind = ['claude', 'codex', 'shell'].includes(pickedKind) ? pickedKind : 'codex';
-  const cwd = prompt('Project directory', JARGAN_ROOT);
+  const cwd = prompt('Project directory', PROJECT_ROOT);
   if (!cwd) return;
   const title = prompt('Session name (the work it owns)', '');
   if (!title || !title.trim()) return;
@@ -9504,7 +9503,7 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
           return;
         }
         if (msg.type === 'openMap') {
-          await vscode.commands.executeCommand(`${commandPrefix}.openJarganMap`);
+          await vscode.commands.executeCommand(`${commandPrefix}.openProjectMap`);
           return;
         }
         if (msg.type === 'setGrid') {

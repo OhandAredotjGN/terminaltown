@@ -12,8 +12,8 @@ The public edition includes an interactive simulation so the board can be explor
 
 This repository is kept as a public-safe edition of the fuller local TerminalTown
 application. Public updates are prepared on a reviewable branch from the local
-renderer, while internal VS Code, JARGAN, host-layout, runtime-evidence, and
-session data remain outside this repository. Host-specific paths and privileged
+renderer, while internal VS Code, host-layout, runtime-evidence, and session
+data remain outside this repository. Host-specific paths and privileged
 agent defaults are supplied only through explicit environment configuration.
 
 ## What it does

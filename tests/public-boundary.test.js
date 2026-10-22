@@ -8,6 +8,16 @@ const { spawn } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
 
+function textFilesUnder(directory) {
+  const result = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) result.push(...textFilesUnder(file));
+    else if (!/\.(?:png|gif|jpe?g|svg|ico|woff2?)$/i.test(entry.name)) result.push(file);
+  }
+  return result;
+}
+
 test('public renderer has current bounded UI without private host markers', () => {
   const { html } = require('../src/aiGrid');
   const rendered = html({ cspSource: "'self'" }, '/assets/disco-ball.svg', '', '/assets/refractions.svg', {});
@@ -15,6 +25,18 @@ test('public renderer has current bounded UI without private host markers', () =
   assert.match(rendered, /Panel health/);
   for (const marker of ['/Volumes/T7', '/Users/beau', '/Users/larson', 'larson.tail41f21e.ts.net', 'http://vermeer', 'dangerously-bypass']) {
     assert.doesNotMatch(rendered, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('public tree contains no private product references', () => {
+  const forbidden = ['jar', 'gan'].join('');
+  const files = [path.join(root, 'README.md'), path.join(root, 'NOTICE.md'), path.join(root, 'package.json')]
+    .concat(textFilesUnder(path.join(root, 'src')))
+    .concat(textFilesUnder(path.join(root, 'scripts')))
+    .concat(textFilesUnder(path.join(root, 'docs')));
+  for (const file of files) {
+    const body = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(body, new RegExp(forbidden, 'i'), file);
   }
 });
 
