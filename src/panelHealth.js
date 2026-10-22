@@ -102,7 +102,12 @@
   function frontendIdentity(directory) {
     // Called only by Node hosts; the same file list follows the standalone and extension renderers.
     const fs = require('node:fs'), path = require('node:path'), hash = require('node:crypto').createHash('sha256');
-    const files = ['aiGrid.js','mobile.js','mobile.css','mobile.html','panelHealth.js','panelHealthClient.js','panelHealth.css','panelHealth.html'];
+    const files = [
+      'aiGrid.js', 'mobile.js', 'mobile.css', 'mobile.html',
+      'panelHealth.js', 'panelHealthClient.js', 'panelHealth.css', 'panelHealth.html',
+      'sessionFinder.js', 'sessionFinder.css', 'sessionFinder.html',
+      'artifactReferences.js', 'artifactLinksClient.js',
+    ];
     for (const file of files) { hash.update(file); hash.update(fs.readFileSync(path.join(directory,file))); }
     return hash.digest('hex').slice(0,20);
   }

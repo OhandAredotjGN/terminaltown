@@ -10,7 +10,7 @@ let mobileCalibrationOverlay = null;
 const mobileDockShapeKey = 'terminaltown-bottom-bar-shape';
 let mobileIosMinimumViewportScale = 1;
 const mobileIosInputSelector = 'input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="button"]):not([type="submit"]),textarea:not(.clipboard-proxy),select';
-const mobileIosFillSelector = '.prompt-input,#boardPickerInput,#holdingSearch,.holding-tools select,.holding-field input,.holding-field select,.panel-menu .chime-mode,.chime-inputs input';
+const mobileIosFillSelector = '.prompt-input,#boardPickerInput,#holdingSearch,.holding-tools select,.holding-panel-select,.holding-field input,.holding-field select,.panel-menu .chime-mode,.chime-inputs input';
 function wrapMobileIosInput(control) {
   if (!(control instanceof HTMLElement) || !control.matches(mobileIosInputSelector) || control.parentElement?.classList.contains('ios-input-wrapper')) return;
   const rect = control.getBoundingClientRect();

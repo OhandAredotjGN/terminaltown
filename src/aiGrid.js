@@ -16,6 +16,8 @@ const {
   updateSessionMemoryFile,
 } = require('./sessionMemory');
 
+const { readDirectory, searchDirectory, resolveSessionName, sessionNameFor, roleTitle, genericName, slug } = require('./sessionDirectory');
+
 const TMUX_BIN = (() => {
   const candidates = [
     process.env.SUMMONER_TMUX_BIN,
@@ -31,6 +33,7 @@ const TMUX_BIN = (() => {
 })();
 
 const LARSON_DESKTOP_SESSION = 'remote:larson-desktop';
+const isPanelName = name => NAME_RE.test(String(name || '')) || name === LARSON_DESKTOP_SESSION;
 function desktopSnapshot(name, slot, spans = {}) {
   return { slot, name, type: 'larson-desktop', display: 'Larson Desktop', title: 'Larson Desktop',
     rowSpan: spans[name] === 2 ? 2 : 1, output: '', state: 'idle', missing: false, clients: '0', noticeKey: '' };
@@ -168,6 +171,95 @@ function codexFullPermissionCommand(args = '') {
   return suffix
     ? `${CODEX_FULL_PERMISSION_COMMAND} ${suffix}`
     : CODEX_FULL_PERMISSION_COMMAND;
+}
+
+// Profiles are session policy, not conversation history. Carry them into every
+// generated launch rather than falling back to the global tool inventory.
+function cleanCodexProfile(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(value || '')) ? String(value) : '';
+}
+
+// Read literal shell arguments without evaluating a command or treating text
+// inside a quoted prompt as options. Complex shell programs are not argv.
+function codexCommandArgs(command) {
+  const words = [];
+  let word = '', quote = '', started = false;
+  const text = String(command || '');
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote === "'") {
+      if (c === "'") quote = ''; else word += c;
+    } else if (c === '\\' && quote !== "'") {
+      if (i + 1 >= text.length) return null;
+      const next = text[++i];
+      word += quote === '"' && !['$', '`', '"', '\\', '\n'].includes(next) ? `\\${next}` : next === '\n' ? '' : next;
+      started = true;
+    } else if (quote === '"') {
+      if (c === '"') quote = ''; else word += c;
+    } else if (c === '"' || c === "'") {
+      quote = c; started = true;
+    } else if (/\s/.test(c)) {
+      if (started) words.push(word);
+      word = ''; started = false;
+    } else if (/[;&|<>]/.test(c)) {
+      return null;
+    } else {
+      word += c; started = true;
+    }
+  }
+  if (quote) return null;
+  if (started) words.push(word);
+  return words;
+}
+
+function codexCommandOptions(command) {
+  const args = codexCommandArgs(command);
+  const options = { args, profile: '', remote: false, resume: -1, profileIndexes: new Set() };
+  const takesValue = new Set(['-c', '--config', '-C', '--cd', '--add-dir', '-m', '--model', '-s', '--sandbox', '-a', '--ask-for-approval', '-i', '--image', '--remote-auth-token-env', '--code-mode-host']);
+  for (let i = 1; args && i < args.length && args[i] !== '--'; i += 1) {
+    const word = args[i];
+    if (word === '-p' || word === '--profile') {
+      options.profileIndexes.add(i); options.profileIndexes.add(i + 1);
+      options.profile = cleanCodexProfile(args[++i]);
+    } else if (word.startsWith('--profile=')) {
+      options.profileIndexes.add(i); options.profile = cleanCodexProfile(word.slice(10));
+    } else if (word === '--remote') { options.remote = true; i += 1; }
+    else if (word.startsWith('--remote=')) options.remote = true;
+    else if (takesValue.has(word)) i += 1;
+    else if (word === 'resume' && options.resume < 0 && SID_RE.test(args[i + 1] || '')) { options.resume = i; i += 1; }
+    else if (!word.startsWith('-')) break;
+  }
+  return options;
+}
+
+function codexProfileFor(record) {
+  return record ? cleanCodexProfile(record.codexProfile) || codexCommandOptions(record.command).profile : '';
+}
+
+function codexPanelCommand(record, args = '') {
+  const profile = codexProfileFor(record);
+  const raw = String(record && record.command || '');
+  const options = codexCommandOptions(raw);
+  const words = options.args;
+  if (!words && /(?:^|\s)--remote(?:\s|=)/.test(raw)) throw new Error('Cannot safely rebuild the saved remote Codex command');
+  if (options.remote) {
+    const resume = options.resume;
+    const base = resume < 0 ? words : words.slice(0, resume);
+    const filtered = [];
+    for (let i = 0; i < base.length; i += 1) {
+      if (options.profileIndexes.has(i)) continue;
+      // A remote endpoint with shell expansion needs its owner to resolve it;
+      // never silently replace it with a locally owned process.
+      if (/[$`]/.test(base[i])) throw new Error('Cannot rebuild a remote Codex command containing shell expansion');
+      filtered.push(/^[A-Za-z0-9_./:=@,+-]+$/.test(base[i]) ? base[i] : shellSingleQuote(base[i]));
+    }
+    return `${filtered.join(' ')}${profile ? ` -p ${profile}` : ''}${args ? ` ${args}` : ''}`;
+  }
+  return codexFullPermissionCommand(`${profile ? `-p ${profile} ` : ''}${args}`);
+}
+
+function codexPanelResumeCommand(record, threadId = record && record.threadId) {
+  return codexPanelCommand(record, `resume ${threadId}`);
 }
 
 function normalizeCodexLaunchCommand(command = '') {
@@ -379,7 +471,8 @@ function stripTrailingClaudePrompt(output) {
 }
 
 function displayPaneOutput(output, command = '', session = {}) {
-  if (/\bcodex\b/i.test(command) || /Ask Codex to do anything/i.test(output)) {
+  if (/\bcodex\b/i.test(command)) return compactCodexTranscript(output, command);
+  if (/Ask Codex to do anything/i.test(output)) {
     return stripTrailingCodexPrompt(output);
   }
   const looksLikeClaudePane = session.resumeId ||
@@ -389,6 +482,40 @@ function displayPaneOutput(output, command = '', session = {}) {
     return stripTrailingClaudePrompt(output);
   }
   return output;
+}
+
+// Agent panels are conversation viewports, not copies of tmux's 300-row screen.
+// Keep meaningful whitespace and active input, but discard idle screen chrome
+// and long runs of empty rows left by alternate-screen redraws.
+function compactCodexTranscript(output, command = '') {
+  const text = cleanText(output);
+  if (!/\bcodex\b/i.test(command)) return text;
+  let lines = text.split('\n');
+  const prompt = /^\s*(?:[›❯>]\s*)?Ask Codex to do anything\s*$/i;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 12); i -= 1) {
+    if (!prompt.test(lines[i])) continue;
+    const chrome = lines.slice(i + 1).every(line => !line.trim() ||
+      /^\s*(?:gpt-\S+(?:\s+(?:minimal|low|medium|high|xhigh|max|ultra))?\s*·\s*)?Context\s+\d+%\s+left(?:\s*·\s*(?:\/|~).*)?\s*$/i.test(line) ||
+      /^\s*\? for shortcuts\b/i.test(line) ||
+      /^\s*⚠\s*\d+ warnings?\b/i.test(line) ||
+      /^\s*esc again to edit previous message\s*$/i.test(line));
+    if (chrome) lines = lines.slice(0, i);
+    break;
+  }
+  const compact = [];
+  let blanks = [], fence = '';
+  const flush = () => { compact.push(...(blanks.length >= 8 ? [''] : blanks)); blanks = []; };
+  for (const line of lines) {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+    if (!fence && !line.trim()) { blanks.push(line); continue; }
+    flush(); compact.push(line);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && line.trim() === marker[1]) fence = '';
+    }
+  }
+  flush();
+  return compact.join('\n').trimEnd();
 }
 
 function cleanTitle(s) {
@@ -467,7 +594,7 @@ function readBoardSummaries() {
       used.add(name);
       return name;
     });
-    boards.set(ctx.id, { id: ctx.id, title: ctx.title, grid, slots });
+    boards.set(ctx.id, { id: ctx.id, title: ctx.title, grid, slots, heldSessions: Array.isArray(parsed.heldSessions) ? [...new Set(parsed.heldSessions)].filter(name => isPanelName(name) && !slots.includes(name)) : [] });
   };
 
   add(LAYOUT_FILE, DEFAULT_BOARD_ID, DEFAULT_BOARD_TITLE);
@@ -486,21 +613,23 @@ function readBoardSummaries() {
 function sessionBoardMembership(boardSummaries) {
   const membership = {};
   for (const board of boardSummaries || []) {
-    for (const name of board.slots || []) {
-      if (!NAME_RE.test(String(name || ''))) continue;
-      if (!membership[name]) membership[name] = [];
-      if (!membership[name].some((item) => item.id === board.id)) {
-        membership[name].push({ id: board.id, title: board.title || board.id });
+    for (const [names, held] of [[board.slots || [], false], [board.heldSessions || [], true]]) {
+      for (const name of names) {
+        if (!isPanelName(name)) continue;
+        if (!membership[name]) membership[name] = [];
+        if (!membership[name].some(item => item.id === board.id)) {
+          membership[name].push({ id: board.id, title: board.title || board.id, ...(held ? {held:true} : {}) });
+        }
       }
     }
   }
   return membership;
 }
 
-// Holding is the complement of placement across every board, including recovery.
+// Board affiliation survives parking; only grid placement excludes Holding.
 function unassignedSessions(names, membership, slots = []) {
   const placed = new Set(slots.filter(Boolean));
-  return names.filter(name => !name.startsWith('terminaltown-meta-') && !placed.has(name) && !(membership[name] || []).length);
+  return names.filter(name => !name.startsWith('terminaltown-meta-') && !placed.has(name) && !(membership[name] || []).some(board => !board.held));
 }
 
 function normalizeGrid(value = {}) {
@@ -605,10 +734,12 @@ function readManifest() {
       const target = normalizeTarget(raw.target, cleanName) || defaultTarget(cleanName);
       sessions[cleanName] = {
         name: cleanName,
+        aliases: Array.isArray(raw.aliases) ? [...new Set(raw.aliases.filter(alias => NAME_RE.test(String(alias)) && alias !== cleanName))] : [],
         kind: cleanKind(raw.kind),
         title: cleanTitle(raw.title),
         cwd: String(raw.cwd || ''),
         command: String(raw.command || ''),
+        codexProfile: cleanCodexProfile(raw.codexProfile),
         resumeId: SID_RE.test(String(raw.resumeId || '')) ? String(raw.resumeId) : '',
         threadId: SID_RE.test(String(raw.threadId || '')) ? String(raw.threadId) : '',
         target,
@@ -1264,7 +1395,7 @@ function readLayoutState(allSessions, board = {}) {
       hasSaved = true;
     }
     if (parsed.spans && typeof parsed.spans === 'object') spans = parsed.spans;
-    if (Array.isArray(parsed.heldSessions)) heldSessions = parsed.heldSessions.filter(name => NAME_RE.test(String(name || '')));
+    if (Array.isArray(parsed.heldSessions)) heldSessions = parsed.heldSessions.filter(isPanelName);
     if (parsed.grid && typeof parsed.grid === 'object') grid = normalizeGrid(parsed.grid);
     else grid = normalizeGrid({ columns: Number(parsed.columns), rows: Number(parsed.rows) });
     title = cleanBoardTitle(parsed.boardTitle || parsed.title || title, ctx.id);
@@ -1288,7 +1419,7 @@ function readLayoutState(allSessions, board = {}) {
   }
 
   for (const name of allSessions) {
-    if (used.has(name)) continue;
+    if (name === LARSON_DESKTOP_SESSION || used.has(name)) continue;
     const open = slots.indexOf('');
     if (open === -1) break;
     slots[open] = name;
@@ -1319,7 +1450,7 @@ function writeLayoutState(state, board = {}) {
       grid: { columns: grid.columns, rows: grid.rows },
       slots,
       spans,
-      heldSessions: [...new Set(state.heldSessions || [])].filter(name => NAME_RE.test(String(name || '')) && !slots.includes(name)),
+      heldSessions: [...new Set(state.heldSessions || [])].filter(name => isPanelName(name) && !slots.includes(name)),
       updatedAt: new Date().toISOString(),
     }, null, 2),
     { mode: 0o600 }
@@ -1368,6 +1499,7 @@ function queueLiveRename(sid, title) {
 }
 
 async function renameSessionLabel(session, title) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const clean = cleanTitle(title);
   if (!clean) throw new Error('rename needs a non-empty title');
@@ -1404,8 +1536,7 @@ function kebab(s) {
 function normalizeJarganPath(p) {
   const value = String(p || '').trim();
   if (!value) return JARGAN_ROOT;
-  if (/\/Users\/[^/]+\/JARGAN$/.test(value)) return JARGAN_ROOT;
-  if (/\/Users\/[^/]+\/JARGAN\//.test(value)) return value.replace(/\/Users\/[^/]+\/JARGAN/, JARGAN_ROOT);
+  if (/^\/Users\/[^/]+\/JARGAN(?:\/|$)/.test(value)) return value.replace(/^\/Users\/[^/]+\/JARGAN/, JARGAN_ROOT);
   return value;
 }
 
@@ -1467,7 +1598,9 @@ async function uniqueSessionName(base) {
   if (!NAME_RE.test(name)) name = 'session';
   let candidate = name;
   let n = 2;
-  while (await exactSessionExists(candidate)) {
+  const manifest = readManifest();
+  const reserved = new Set(Object.entries(manifest.sessions).flatMap(([name, record]) => [name, ...(record.aliases || [])]));
+  while (reserved.has(candidate) || await exactSessionExists(candidate)) {
     candidate = `${name}-${n}`;
     n += 1;
   }
@@ -1483,6 +1616,7 @@ async function placeNewSession(name, placement, board = {}) {
   }
   delete spans[name];
   if (placement === 'holding') {
+    state.heldSessions = [...new Set([...(state.heldSessions || []), name])];
     writeLayoutState(state, board);
     return;
   }
@@ -1490,13 +1624,24 @@ async function placeNewSession(name, placement, board = {}) {
   if (!Number.isInteger(slot) || slot < 0 || slot >= slots.length) {
     slot = slots.findIndex((s) => !s);
   }
-  if (slot >= 0) slots[slot] = name;
+  if (slot >= 0) {
+    const displaced = slots[slot];
+    if (displaced && displaced !== name) {
+      state.heldSessions = [...new Set([...(state.heldSessions || []), displaced])];
+      delete spans[displaced];
+      if (boardContext(board).isDefault) updateManifestSlot(displaced, null);
+    }
+    slots[slot] = name;
+  }
   writeLayoutState(state, board);
 }
 
 async function createAiSession({ session, cwd, command, initialPrompt, placement, title, board }) {
+  const requestedName = session;
+  session = sessionNameFor(session, title, initialPrompt);
+  if (session !== requestedName) session = await uniqueSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('Session names can use only letters, numbers, dot, underscore, and dash.');
-  if (await exactSessionExists(session)) throw new Error(`${session} already exists`);
+  if (readManifest().sessions[session] || Object.values(readManifest().sessions).some(record => (record.aliases || []).includes(session)) || await exactSessionExists(session)) throw new Error(`${session} already exists; choose a different session name.`);
   const ctx = boardContext(board);
   const dir = normalizeJarganPath(cwd || JARGAN_ROOT);
   if (!fs.existsSync(dir)) throw new Error(`Directory does not exist: ${dir}`);
@@ -1547,11 +1692,11 @@ async function createMetaSession({ goal, slot, kind, cwd, board }) {
   }
   if (state.slots[requestedSlot]) throw new Error(`Panel ${requestedSlot + 1} is occupied by ${state.slots[requestedSlot]}.`);
   const sessionKind = String(kind || '').toLowerCase() === 'claude' ? 'claude' : 'codex';
-  const session = await uniqueSessionName(`${sessionKind}-panel-${requestedSlot + 1}`);
+  const title = cleanTitle(roleTitle(text));
+  const session = await uniqueSessionName(title);
   const command = sessionKind === 'claude'
     ? 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide'
     : codexFullPermissionCommand();
-  const title = cleanTitle(`Panel ${requestedSlot + 1} · ${text.slice(0, 54)}`) || `Panel ${requestedSlot + 1}`;
   return createAiSession({ session, cwd: String(cwd || JARGAN_ROOT), command, initialPrompt: text, placement: String(requestedSlot), title, board });
 }
 
@@ -1591,6 +1736,7 @@ function codexUpdatePromptVisible(output) {
 }
 
 function queuePendingPrompt(name, prompt) {
+  name = canonicalSessionName(name);
   const manifest = readManifest();
   const record = manifest.sessions[name];
   if (!record) throw new Error(`${name} has no saved session record`);
@@ -1625,6 +1771,7 @@ function memoryHydrationPatch(name, record, conversation) {
 }
 
 function queueMemoryHydration(name, conversation) {
+  name = canonicalSessionName(name);
   const manifest = readManifest();
   const record = manifest.sessions[name];
   if (!record) throw new Error(`${name} has no saved session record`);
@@ -1637,6 +1784,7 @@ function queueMemoryHydration(name, conversation) {
 }
 
 function updateSessionMemory(session, messageType, payload = {}) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(String(session || ''))) throw new Error('A valid session is required');
   const revision = Number(payload.revision);
   if (!Number.isInteger(revision) || revision < 0) throw new Error('A current session memory revision is required');
@@ -1723,22 +1871,59 @@ function schedulePendingPromptSweep(manifest) {
   }
 }
 
-function holdSession(session) {
-  if (!NAME_RE.test(session)) throw new Error('bad session');
+function clearHeldBoardMembership(session) {
+  for (const item of readBoardSummaries()) {
+    if (!(item.heldSessions || []).includes(session)) continue;
+    const context = boardContext({ boardId: item.id, boardTitle: item.title });
+    const state = readLayoutState([], context);
+    state.heldSessions = (state.heldSessions || []).filter(name => name !== session);
+    writeLayoutState(state, context);
+  }
+}
+
+function holdSession(session, { forgetBoard = false } = {}) {
+  session = canonicalSessionName(session);
+  if (!isPanelName(session)) throw new Error('bad session');
   let removedFromDefault = false;
   for (const item of readBoardSummaries()) {
     const context = boardContext({ boardId: item.id, boardTitle: item.title });
     const state = readLayoutState([], context);
-    if (!state.slots.includes(session) && !Object.prototype.hasOwnProperty.call(state.spans, session)) continue;
-    state.slots = state.slots.map((name) => (name === session ? '' : name));
+    const placed = state.slots.includes(session) || Object.prototype.hasOwnProperty.call(state.spans, session);
+    const held = (state.heldSessions || []).includes(session);
+    if (!placed && !(forgetBoard && held)) continue;
+    state.slots = state.slots.map(name => name === session ? '' : name);
     delete state.spans[session];
+    state.heldSessions = forgetBoard
+      ? (state.heldSessions || []).filter(name => name !== session)
+      : [...new Set([...(state.heldSessions || []), session])];
     writeLayoutState(state, context);
-    if (context.isDefault) removedFromDefault = true;
+    if (placed && context.isDefault) removedFromDefault = true;
   }
   if (removedFromDefault) updateManifestSlot(session, null);
 }
 
+async function assignHeldBoard(session, boardId) {
+  const allSessions = await listKnownSessions();
+  session = canonicalSessionName(session, allSessions);
+  if (!session || (session !== LARSON_DESKTOP_SESSION && !allSessions.includes(session))) throw new Error(`unknown session: ${session || 'empty'}`);
+  const summaries = readBoardSummaries();
+  if (summaries.some(board => board.slots.includes(session))) throw new Error('This session is no longer in Holding. Refresh its placement.');
+  const requested = String(boardId || '').trim();
+  const summary = requested ? summaries.find(board => board.id === requested) : null;
+  if (requested && !summary) throw new Error(`unknown board: ${requested}`);
+  clearHeldBoardMembership(session);
+  updateManifestSlot(session, null);
+  if (summary) {
+    const context = boardContext({boardId:summary.id, boardTitle:summary.title});
+    const state = readLayoutState([], context);
+    state.heldSessions = [...new Set([...(state.heldSessions || []), session])];
+    writeLayoutState(state, context);
+  }
+  return {held:true, board:summary ? {id:summary.id, title:summary.title} : null};
+}
+
 async function byeSession(session, board = {}) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const { target } = await resolveSessionActionTarget(session);
   try {
@@ -1755,7 +1940,7 @@ async function byeSession(session, board = {}) {
       || /^error connecting to .+ \(No such file or directory\)$/m.test(stderr);
     if (!alreadyGone) throw err;
   }
-  holdSession(session);
+  holdSession(session, {forgetBoard:true});
   const manifest = readManifest();
   if (manifest.sessions[session]) {
     delete manifest.sessions[session];
@@ -1764,11 +1949,14 @@ async function byeSession(session, board = {}) {
 }
 
 function moveSessionFiles(from, to) {
-  for (const directory of [SNAPSHOT_DIR, SCROLLBACK_DIR]) {
+  for (const directory of [SNAPSHOT_DIR, SCROLLBACK_DIR, HYDRATION_DIR]) {
     const source = path.join(directory, `${from}.txt`);
     const destination = path.join(directory, `${to}.txt`);
     try {
-      if (fs.existsSync(source) && !fs.existsSync(destination)) fs.renameSync(source, destination);
+      if (fs.existsSync(source) && !fs.existsSync(destination)) {
+        if (directory === HYDRATION_DIR) fs.copyFileSync(source, destination);
+        else fs.renameSync(source, destination);
+      }
     } catch {}
   }
 }
@@ -1793,11 +1981,14 @@ async function renameBoardTitle(title, board = {}) {
 }
 
 async function renameTmuxSession(session, nextName) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session) || !NAME_RE.test(nextName)) throw new Error('tmux names may use only letters, numbers, dot, underscore, and dash');
   if (session === nextName) return nextName;
-  if (await exactSessionExists(nextName)) throw new Error(`${nextName} already exists`);
-  const { target } = await resolveSessionActionTarget(session);
-  await tmuxSocket(target.socket, ['rename-session', '-t', sessionSpec(target), nextName], { timeout: 3000 });
+  if (readManifest().sessions[nextName] || Object.values(readManifest().sessions).some(record => (record.aliases || []).includes(nextName)) || await exactSessionExists(nextName)) throw new Error(`${nextName} already exists`);
+  const { target, live, record: savedRecord } = await resolveSessionActionTarget(session);
+  if (!live && !savedRecord) throw new Error(`Unknown session: ${session}`);
+  const renameLiveSurface = live && target.session === session;
+  if (renameLiveSurface) await tmuxSocket(target.socket, ['rename-session', '-t', sessionSpec(target), nextName], { timeout: 3000 });
 
   const titleRecords = readTitleRecords();
   let titlesChanged = false;
@@ -1814,7 +2005,9 @@ async function renameTmuxSession(session, nextName) {
   upsertManifestRecord(manifest, nextName, {
     ...record,
     name: nextName,
-    target: { ...target, session: nextName },
+    aliases: [...new Set([...(record.aliases || []), session])],
+    lastSnapshot: record.lastSnapshot === snapshotPathFor(session) ? snapshotPathFor(nextName) : record.lastSnapshot,
+    target: { ...target, session: target.session === session ? nextName : target.session },
     lastSeenAt: new Date().toISOString(),
   });
   writeManifest(manifest);
@@ -1828,6 +2021,7 @@ async function renameTmuxSession(session, nextName) {
       changed = true;
       return nextName;
     });
+    state.heldSessions = (state.heldSessions || []).map(name => { if (name !== session) return name; changed = true; return nextName; });
     if (state.spans[session] !== undefined) {
       state.spans[nextName] = state.spans[session];
       delete state.spans[session];
@@ -1840,16 +2034,18 @@ async function renameTmuxSession(session, nextName) {
     paneScrollbackLatest.delete(session);
   }
   moveSessionFiles(session, nextName);
+  if (record.pendingPrompt) schedulePendingPromptDelivery(nextName);
   return nextName;
 }
 
 async function moveSessionToBoard(session, boardId) {
   const allSessions = await listKnownSessions();
   session = canonicalSessionName(session, allSessions);
-  if (!session || !allSessions.includes(session)) throw new Error(`unknown session: ${session || 'empty'}`);
+  if (!session || (session !== LARSON_DESKTOP_SESSION && !allSessions.includes(session))) throw new Error(`unknown session: ${session || 'empty'}`);
   const requestedBoardId = String(boardId || '').trim();
   if (!requestedBoardId) {
-    holdSession(session);
+    holdSession(session, {forgetBoard:true});
+    updateManifestSlot(session, null);
     return { held: true };
   }
   const summary = readBoardSummaries().find((item) => item.id === requestedBoardId);
@@ -1859,7 +2055,7 @@ async function moveSessionToBoard(session, boardId) {
   let slot = state.slots.indexOf(session);
   if (slot === -1) slot = state.slots.findIndex((name) => !name);
   if (slot === -1) throw new Error(`No empty slot on ${destination.title}`);
-  holdSession(session);
+  holdSession(session, {forgetBoard:true});
   await assignSlot(slot, session, destination);
   return { held: false, board: destination, slot };
 }
@@ -1874,11 +2070,14 @@ async function assignSlot(slot, session, board = {}) {
   if (session && session !== LARSON_DESKTOP_SESSION && !existing.has(session)) throw new Error(`unknown session: ${session}`);
   const { slots, spans } = state;
   const displaced = slots[slot];
-  if (displaced && displaced !== session) delete spans[displaced];
+  if (displaced && displaced !== session) {
+    delete spans[displaced];
+    state.heldSessions = [...new Set([...(state.heldSessions || []), displaced])];
+  }
   for (let i = 0; i < slots.length; i += 1) {
     if (slots[i] === session) slots[i] = '';
   }
-  if (session) delete spans[session];
+  if (session) { delete spans[session]; clearHeldBoardMembership(session); }
   slots[slot] = session || '';
   writeLayoutState(state, board);
   if (ctx.isDefault && displaced && displaced !== session) updateManifestSlot(displaced, null);
@@ -1913,12 +2112,16 @@ async function moveSlot(fromSlot, toSlot, session, board = {}, expectedTarget) {
     return state;
   }
 
-  if (!session || !existing.has(session)) throw new Error(`unknown session: ${session}`);
+  if (!session || (session !== LARSON_DESKTOP_SESSION && !existing.has(session))) throw new Error(`unknown session: ${session}`);
   for (let i = 0; i < slots.length; i += 1) {
     if (slots[i] === session) slots[i] = '';
   }
   const displaced = slots[toSlot];
-  if (displaced) delete spans[displaced];
+  if (displaced) {
+    delete spans[displaced];
+    state.heldSessions = [...new Set([...(state.heldSessions || []), displaced])];
+  }
+  clearHeldBoardMembership(session);
   delete spans[session];
   slots[toSlot] = session;
   writeLayoutState(state, board);
@@ -2026,7 +2229,10 @@ async function setGridShape(columns, rows, board = {}) {
     if (!nextSlots[i] || seen.has(nextSlots[i])) nextSlots[i] = '';
     else seen.add(nextSlots[i]);
   }
-  writeLayoutState({ ...state, grid: nextGrid, slots: nextSlots }, board);
+  const parked = state.slots.slice(nextGrid.slotCount).filter(Boolean);
+  const heldSessions = [...new Set([...(state.heldSessions || []), ...parked])];
+  writeLayoutState({ ...state, grid: nextGrid, slots: nextSlots, heldSessions }, board);
+  if (boardContext(board).isDefault) for (const name of parked) updateManifestSlot(name, null);
   return nextGrid;
 }
 
@@ -2064,19 +2270,29 @@ function liveClaudeRecordBySid(records, liveTargets, sid) {
   return matches[0] || null;
 }
 
-function recordNameForClaude(record, titleBySid, existingNames, savedSlots = []) {
+function recordNameForClaude(record, titleBySid, existingNames, savedSlots = [], reservedNames = existingNames) {
+  const available = (base, reserveSlots = false) => {
+    if (!(reserveSlots ? existingNames : reservedNames).has(base)) return base;
+    let suffix = 2; let name;
+    do {
+      const ending = `-${suffix++}`;
+      name = base.slice(0, 64 - ending.length) + ending;
+    } while (existingNames.has(name) || reservedNames.has(name));
+    return name;
+  };
   const sid = String(record.sessionId || '');
   const titleRecords = titleBySid.get(sid) || [];
-  const existing = titleRecords.find((item) => existingNames.has(item.tmux));
-  if (existing && NAME_RE.test(existing.tmux)) return existing.tmux;
+  const existing = titleRecords.find((item) => existingNames.has(item.tmux) && !genericName(item.tmux));
+  if (existing && NAME_RE.test(existing.tmux)) return available(existing.tmux);
   const cwdBase = path.basename(String(record.cwd || ''));
-  const cwdSlot = savedSlots.find((name) => name === cwdBase);
-  if (cwdSlot) return cwdSlot;
-  const inactive = titleRecords.find((item) => NAME_RE.test(item.tmux) && item.tmux !== record.tmuxName);
-  if (inactive) return inactive.tmux;
-  if (NAME_RE.test(record.windowName || '') && !savedSlots.includes(record.windowName)) return record.windowName;
-  if (NAME_RE.test(record.tmuxName || '') && record.tmuxName !== 'fleet') return record.tmuxName;
-  return `claude-${sid.slice(0, 8)}`;
+  const cwdSlot = savedSlots.find((name) => name === cwdBase && name === record.tmuxName);
+  if (cwdSlot) return available(cwdSlot);
+  const inactive = titleRecords.find((item) => NAME_RE.test(item.tmux) && !genericName(item.tmux) && item.tmux !== record.tmuxName);
+  if (inactive) return available(inactive.tmux);
+  if (NAME_RE.test(record.tmuxName || '') && !genericName(record.tmuxName) && record.tmuxName !== 'fleet') return available(record.tmuxName);
+  if (NAME_RE.test(record.windowName || '') && !genericName(record.windowName) && !savedSlots.includes(record.windowName)) return available(record.windowName);
+  const base = slug(record.title && !genericName(record.title) ? roleTitle(record.title) : `${cwdBase || 'workspace'} session`);
+  return available(base, true);
 }
 
 function adoptLiveClaudeRecords(manifest, slots, titles, claudeRecords, liveTargets, options = {}) {
@@ -2084,7 +2300,8 @@ function adoptLiveClaudeRecords(manifest, slots, titles, claudeRecords, liveTarg
   const writeSlots = options.writeSlots !== false;
   const titleRecords = readTitleRecords();
   const bySid = titleRecordsBySid(titleRecords);
-  const existingNames = new Set([...slots.filter(Boolean), ...Object.keys(manifest.sessions)]);
+  const reservedNames = new Set(Object.entries(manifest.sessions).flatMap(([name, record]) => [name, ...(record.aliases || [])]));
+  const existingNames = new Set([...slots.filter(Boolean), ...reservedNames]);
 
   for (const record of claudeRecords) {
     if (!record.target || !targetIsLive(record.target, liveTargets)) continue;
@@ -2099,8 +2316,10 @@ function adoptLiveClaudeRecords(manifest, slots, titles, claudeRecords, liveTarg
       });
     const name = existingBySid || existingByTarget
       ? (existingBySid || existingByTarget)[0]
-      : recordNameForClaude(record, bySid, existingNames, slots);
+      : recordNameForClaude(record, bySid, existingNames, slots, reservedNames);
     if (!NAME_RE.test(name)) continue;
+    existingNames.add(name);
+    reservedNames.add(name);
     const titleRecord = titleRecordForName(name, titleRecords);
     const prev = manifest.sessions[name];
     const title = cleanTitle((prev && prev.title) || (titleRecord && titleRecord.title) || titles.get(name)?.title || record.title || record.windowName || name);
@@ -2145,7 +2364,8 @@ function mergeSessionNames(liveSessionNames, manifest, liveTargets) {
   for (const [name, record] of Object.entries(manifest.sessions || {})) {
     if (targetIsLive(record.target || defaultTarget(name), liveTargets) || recordCanRecover(record)) add(name);
   }
-  return names.filter((name) => liveSessionNames.includes(name) || (manifest.sessions[name] && (targetIsLive(manifest.sessions[name].target, liveTargets) || recordCanRecover(manifest.sessions[name]))));
+  names.push(LARSON_DESKTOP_SESSION);
+  return names.filter((name) => name === LARSON_DESKTOP_SESSION || liveSessionNames.includes(name) || (manifest.sessions[name] && (targetIsLive(manifest.sessions[name].target, liveTargets) || recordCanRecover(manifest.sessions[name]))));
 }
 
 function recordCanRecover(record) {
@@ -2156,22 +2376,27 @@ function restoreManifestSlots(state, manifest, liveTargets) {
   if (!state || !manifest || !manifest.sessions) return { state, changed: false };
   const slots = [...state.slots];
   const used = new Set(slots.filter(Boolean));
-  const placedOnOtherBoards = new Set(readBoardSummaries()
+  const summaries = readBoardSummaries();
+  const heldOnAnyBoard = new Set(summaries.flatMap(board => board.heldSessions || []));
+  const placedOnOtherBoards = new Set(summaries
     .filter(board => board.id !== DEFAULT_BOARD_ID)
     .flatMap(board => board.slots.filter(Boolean)));
   let changed = false;
+  const latest = fs.existsSync(MANIFEST_FILE) ? readManifest() : manifest;
   const records = Object.entries(manifest.sessions)
     .filter(([name, record]) => NAME_RE.test(String(name || '')) && Number.isInteger(record.slot))
     .sort((a, b) => Number(a[1].slot) - Number(b[1].slot));
 
   for (const [name, record] of records) {
     const slot = Number(record.slot);
+    const current = latest.sessions[name];
+    if (!current || current.slot !== record.slot) continue;
     if (slot < 0 || slot >= slots.length) continue;
     // Legacy and external writers can record a named-board slot in the shared
     // manifest. Only an unassigned record may recover into a default-board gap.
     if (placedOnOtherBoards.has(name) && !used.has(name)) continue;
     // A resize may have parked this session after the caller read its manifest.
-    if ((state.heldSessions || []).includes(name) || used.has(name) || slots[slot]) continue;
+    if (heldOnAnyBoard.has(name) || (state.heldSessions || []).includes(name) || used.has(name) || slots[slot]) continue;
     if (!targetIsLive(record.target || defaultTarget(name), liveTargets) && !recordCanRecover(record)) continue;
     slots[slot] = name;
     used.add(name);
@@ -2188,11 +2413,15 @@ async function listKnownSessions() {
 }
 
 function canonicalSessionName(session, knownSessions = []) {
-  const value = String(session || '');
-  if (!value) return '';
-  if (knownSessions.includes(value)) return value;
-  const lower = value.toLowerCase();
-  return knownSessions.find((name) => name.toLowerCase() === lower) || value;
+  return resolveSessionName(session, readManifest(), knownSessions, readTitleRecords());
+}
+
+async function sessionDirectory(query = '') {
+  const manifest = readManifest();
+  const liveTargets = await readLiveTargets(manifest);
+  const liveNames = allLiveSessionNames(liveTargets);
+  for (const [name, record] of Object.entries(manifest.sessions)) if (targetIsLive(record.target || defaultTarget(name), liveTargets) && !liveNames.includes(name)) liveNames.push(name);
+  return searchDirectory(readDirectory({ dataDir: DATA_DIR, manifestFile: MANIFEST_FILE, titlesFile: TITLES_FILE, liveNames }), query);
 }
 
 // Live context = what the last request re-sent. Every turn pays for all of it.
@@ -2237,7 +2466,17 @@ function agentFreshStartCommand(name, record) {
   const memory = normalizeSessionMemory(record && record.memory);
   const kind = record && record.kind;
   if (!NAME_RE.test(String(name || '')) || !memory.approvedCharter || !['claude', 'codex'].includes(kind)) return '';
-  return launchWithPromptFile(name, kind, composeHydrationPrompt(memory, { session: name, memoryCommand: SESSION_MEMORY_COMMAND, mode: 'standby' }));
+  return launchWithPromptFile(name, kind, composeHydrationPrompt(memory, { session: name, memoryCommand: SESSION_MEMORY_COMMAND, mode: 'standby' }), record);
+}
+
+function isRunningAgent(record, command) {
+  const current = String(command || '').trim();
+  if (/^(?:codex|claude)(?:\s|$)/i.test(current)) return true;
+  // Native Claude installs can expose their version as the process name.
+  // Match only the saved Claude executable, never an arbitrary numeric command.
+  const executable = String(record?.command || '').trim().split(/\s+/)[0];
+  return record?.kind === 'claude' && /^\d+\.\d+\.\d+$/.test(current) &&
+    /\/claude\/versions\//.test(executable) && path.basename(executable) === current;
 }
 
 function isDormantAgent(record, command) {
@@ -2246,26 +2485,27 @@ function isDormantAgent(record, command) {
 }
 
 // What a sleeping panel shows instead of the dead shell it left behind.
-function readyPanelText(record) {
+function readyPanelText(record, { compact = false } = {}) {
   const memory = normalizeSessionMemory(record && record.memory);
   const first = (value) => (String(value || '').split('\n').find((line) => line.trim()) || '').trim().slice(0, 240);
   const agent = record && record.kind === 'codex' ? 'Codex' : 'Claude';
-  const lines = ['READY', '',
-    `Type a message below to start this panel. ${agent} starts fresh with this panel's charter and saved memory plus your message, in one launch. Nothing runs or spends tokens until then.`];
+  const lines = ['READY', '', compact
+    ? `${agent} starts a fresh conversation${memory.approvedCharter ? ' with the saved role and context' : ''}.`
+    : `Type a message below to start this panel. ${agent} starts fresh with this panel's charter and saved memory plus your message, in one launch. Nothing runs or spends tokens until then.`];
   if (first(memory.approvedCharter)) lines.push('', `Role: ${first(memory.approvedCharter)}`);
   if (first(memory.contextSummary)) lines.push(`Last context: ${first(memory.contextSummary)}`);
   return lines.join('\n');
 }
 
 // The launch prompt travels in a private file so the shell never parses it.
-function launchWithPromptFile(name, kind, text) {
+function launchWithPromptFile(name, kind, text, record = null) {
   fs.mkdirSync(HYDRATION_DIR, { recursive: true, mode: 0o700 });
   const file = path.join(HYDRATION_DIR, `${name}.txt`);
   fs.writeFileSync(file, String(text), { mode: 0o600 });
   const arg = `"$(cat ${shellSingleQuote(file)})"`;
   return kind === 'claude'
     ? `claude --dangerously-skip-permissions --rc --ide ${arg}`
-    : codexFullPermissionCommand(arg);
+    : codexPanelCommand(record, arg);
 }
 
 function shellSingleQuote(value) {
@@ -2289,7 +2529,7 @@ async function startAgentOnFirstMessage(session, record, target, live, prompt) {
   const text = memory.approvedCharter
     ? `${composeHydrationPrompt(memory, { session, memoryCommand: SESSION_MEMORY_COMMAND })}\n\nUSER REQUEST\n${String(prompt).trim()}`
     : String(prompt).trim();
-  const command = launchWithPromptFile(session, record.kind, text);
+  const command = launchWithPromptFile(session, record.kind, text, record);
   const cwd = record.cwd && fs.existsSync(record.cwd) ? record.cwd : '';
   let liveTarget = target;
   if (live) {
@@ -2382,7 +2622,7 @@ async function spawnRecoveredSession(name, record, freshCommand = '') {
   } else if (record.kind === 'claude' && SID_RE.test(record.resumeId || '')) {
     command = `claude --dangerously-skip-permissions --resume ${record.resumeId} --rc --ide`;
   } else if (record.kind === 'codex' && SID_RE.test(record.threadId || '')) {
-    command = codexFullPermissionCommand(`resume ${record.threadId}`);
+    command = codexPanelResumeCommand(record);
   }
   if (!command) throw new Error(`${name} has no recovery command`);
   await tmux(['new-session', '-d', '-s', name, '-c', cwd], { timeout: 5000 });
@@ -2395,7 +2635,7 @@ function agentResumeCommand(record) {
     return `claude --dangerously-skip-permissions --resume ${record.resumeId} --rc --ide`;
   }
   if (record && record.kind === 'codex' && SID_RE.test(record.threadId || '')) {
-    return codexFullPermissionCommand(`resume ${record.threadId}`);
+    return codexPanelResumeCommand(record);
   }
   return '';
 }
@@ -2779,7 +3019,7 @@ function updateManifestFromSnapshots(manifest, sessions, options = {}) {
     const conversation = observedConversation(patch);
     if (conversation.id) Object.assign(patch, memoryHydrationPatch(session.name, patch, conversation));
     if (patch.kind === 'codex' && SID_RE.test(patch.threadId || '')) {
-      patch.command = codexFullPermissionCommand(`resume ${patch.threadId}`);
+      patch.command = codexPanelResumeCommand(patch);
     } else if (patch.kind === 'claude' && SID_RE.test(patch.resumeId || '')) {
       patch.command = `claude --dangerously-skip-permissions --resume ${patch.resumeId} --rc --ide`;
     } else {
@@ -2840,7 +3080,7 @@ async function collectRecovery(options = {}, mode = 'automatic', reason = '') {
     slots,
     spans,
     allSessions,
-    titles: {},
+    titles: Object.fromEntries(Object.entries(manifest.sessions).filter(([, record]) => record.title).map(([name, record]) => [name, record.title])),
     sessions,
     holding: unassignedSessions(allSessions, holdingMembership, slots).sort(),
     holdingBoards: boardSummaries.map((item) => ({ id: item.id, title: item.title })),
@@ -2866,6 +3106,9 @@ async function collectLive(options = {}) {
   const boardSummaries = readBoardSummaries();
   const holdingMembership = sessionBoardMembership(boardSummaries);
   const titles = titleMap();
+  for (const [name, record] of Object.entries(manifest.sessions)) {
+    if (!titles.has(name) && record.title) titles.set(name, {title:record.title});
+  }
   const claudeRecords = readClaudeSessionRecords();
   const adopted = !options.observeOnly && adoptLiveClaudeRecords(manifest, readLayoutState(liveSessionNames, board).slots, titles, claudeRecords, liveTargets, { writeSlots: board.isDefault });
   if (adopted) writeManifest(manifest);
@@ -2975,7 +3218,8 @@ async function loadTmuxBufferFromFile(target, buffer, value) {
   }
 }
 
-async function sendPrompt(session, prompt, submitKey = 'enter', { startup = false } = {}) {
+async function sendPrompt(session, prompt, submitKey = 'enter', { startup = false, agentOnly = false } = {}) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session) || !String(prompt || '').trim()) throw new Error('bad prompt request');
   const keyName = tmuxKeyName(submitKey || 'enter');
   if (!keyName) throw new Error(`unsupported submit key: ${submitKey}`);
@@ -2983,6 +3227,14 @@ async function sendPrompt(session, prompt, submitKey = 'enter', { startup = fals
   if (!startup && record && keyName === 'Enter' && !parseResetCommand(record.kind, prompt) &&
       await startAgentOnFirstMessage(session, record, target, live, prompt)) {
     return;
+  }
+  if (agentOnly) {
+    // A failed first-message probe must never fall through to paste + Enter
+    // at a shell. Meta only delivers ordinary input to a confirmed agent.
+    const command = String(await tmuxSocket(target.socket, ['display-message', '-p', '-t', targetSpec(target), '#{pane_current_command}'], { timeout: 3000 })).trim();
+    if (!isRunningAgent(record, command)) {
+      throw new Error(`Cannot confirm a running agent for ${session}; no input was sent.`);
+    }
   }
   if (!startup && record && keyName === 'Enter' && parseResetCommand(record.kind, prompt)) {
     const manifest = readManifest();
@@ -3020,6 +3272,7 @@ async function sendPrompt(session, prompt, submitKey = 'enter', { startup = fals
 }
 
 async function pasteText(session, text) {
+  session = canonicalSessionName(session);
   const value = String(text || '');
   if (!NAME_RE.test(session) || !value) throw new Error('bad paste request');
   const { target } = await resolveSessionActionTarget(session);
@@ -3058,7 +3311,7 @@ function savePastedImages(images) {
   const list = Array.isArray(images) ? images : [];
   if (!list.length) throw new Error('no image data in clipboard');
   fs.mkdirSync(PASTE_DIR, { recursive: true, mode: 0o700 });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-') + '-' + require('crypto').randomBytes(4).toString('hex');
   return list.slice(0, 8).map((image, index) => {
     const decoded = decodePastedImage(image);
     const file = path.join(PASTE_DIR, `${stamp}-${process.pid}-${index + 1}.${decoded.ext}`);
@@ -3068,10 +3321,33 @@ function savePastedImages(images) {
 }
 
 async function pasteImages(session, images) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const files = savePastedImages(images);
   await pasteText(session, files.join(' '));
   return files;
+}
+
+async function stageImageDraft(session, message) {
+  try {
+    if (!NAME_RE.test(session) || message.session !== session) throw new Error('The panel changed; paste into its current prompt.');
+    if (!Array.isArray(message.images) || !message.images.length || message.images.length > 8) throw new Error('Paste up to 8 images at a time.');
+    message.images.forEach(decodePastedImage);
+    return { type: 'imageDraftResult', stageId: message.stageId, session, ok: true, files: savePastedImages(message.images) };
+  } catch (error) {
+    return { type: 'imageDraftResult', stageId: message.stageId, session: message.session, ok: false, error: error.message };
+  }
+}
+
+async function sendPanelPrompt(session, message) {
+  try {
+    if (message.session && message.session !== session) throw new Error('The panel changed; your draft was kept.');
+    await sendPrompt(session, String(message.prompt || ''), String(message.submitKey || 'enter'));
+    return { type: 'promptResult', draftId: message.draftId, session, ok: true };
+  } catch (error) {
+    if (!message.draftId) throw error;
+    return { type: 'promptResult', draftId: message.draftId, session: message.session, ok: false, error: error.message };
+  }
 }
 
 function appleScriptQuoted(value) {
@@ -3129,7 +3405,16 @@ async function pasteSystemClipboardImage(session) {
   return files;
 }
 
+async function systemClipboardImageDraft(session) {
+  if (!NAME_RE.test(session)) throw new Error('bad session');
+  const files = await saveMacClipboardImage();
+  return { type: 'clipboardImageDraft', session, images: files.map(file => ({
+    path: file, dataUrl: 'data:image/' + (file.endsWith('.tiff') ? 'tiff' : 'png') + ';base64,' + fs.readFileSync(file).toString('base64'),
+  })) };
+}
+
 async function sendKey(session, key) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const { target } = await resolveSessionActionTarget(session);
   const mapped = tmuxKeyName(key);
@@ -3205,6 +3490,7 @@ function tmuxKeyName(key) {
     case 'up': return 'Up';
     case 'down': return 'Down';
     case 'left': return 'Left';
+    case 'shift-left': return 'S-Left';
     case 'right': return 'Right';
     case 'space': return 'Space';
     case 'delete': return 'DC';
@@ -3213,7 +3499,9 @@ function tmuxKeyName(key) {
 }
 
 async function openFullTerminal(vscode, session, title = '') {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
+  if (!EXTERNAL_TERMINAL_URL) throw new Error('External terminal handoff is not configured for this host.');
   const { target } = await resolveSessionActionTarget(session);
   await postJson(EXTERNAL_TERMINAL_URL, {
     session,
@@ -3224,6 +3512,7 @@ async function openFullTerminal(vscode, session, title = '') {
 }
 
 async function resolveSessionActionTarget(session) {
+  session = canonicalSessionName(session);
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const manifest = readManifest();
   const record = manifest.sessions[session] || null;
@@ -3272,22 +3561,13 @@ function postJson(urlText, body) {
 }
 
 async function pickSession(vscode, title) {
-  const data = await collect();
-  const items = (data.allSessions || []).map((name) => {
-    const session = (data.sessions || []).find((item) => item.name === name);
-    return {
-      label: data.titles && data.titles[name] || name,
-      description: name,
-      detail: session && session.target ? session.target : '',
-      name,
-    };
-  });
-  const picked = await vscode.window.showQuickPick(items, {
-    title,
-    placeHolder: 'Choose the tmux session to control',
-    matchOnDescription: true,
-    matchOnDetail: true,
-  });
+  const items = (await sessionDirectory()).filter(record => record.kind !== 'desktop').map(record => ({
+    label: record.title,
+    description: record.locations.map(loc => `${loc.boardTitle} · ${loc.surface === 'meta' ? 'Meta Terminal' : loc.surface === 'holding' ? 'Holding' : 'Panel '+loc.panel}`).join(', ') || 'Holding',
+    detail: [record.charter, record.cwd, record.name, ...record.aliases].filter(Boolean).join(' · '),
+    name: record.name,
+  }));
+  const picked = await vscode.window.showQuickPick(items, { title, placeHolder: 'Find a session by name or purpose', matchOnDescription: true, matchOnDetail: true });
   return picked ? picked.name : null;
 }
 
@@ -3343,7 +3623,6 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
       ignoreFocusOut: true,
     });
     if (!cwd) return null;
-    session = await uniqueSessionName(path.basename(cwd));
     command = 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide';
   } else if (source.kind === 'codex') {
     cwd = await vscode.window.showInputBox({
@@ -3352,27 +3631,18 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
       ignoreFocusOut: true,
     });
     if (!cwd) return null;
-    session = await uniqueSessionName(`codex-${path.basename(cwd)}`);
     command = codexFullPermissionCommand();
-  } else {
-    session = await uniqueSessionName(source.session || source.label);
   }
 
-  session = await vscode.window.showInputBox({
-    title: 'Tmux Session Name',
-    value: session,
-    validateInput: (value) => NAME_RE.test(value) ? null : 'Use letters, numbers, dot, underscore, or dash.',
-    ignoreFocusOut: true,
-  });
-  if (!session) return null;
-
   title = await vscode.window.showInputBox({
-    title: 'Display Name',
-    value: cleanTitle(title) || session,
-    prompt: 'Shown on the AI board and reused by restored VS Code terminal tabs.',
+    title: 'Session name',
+    value: cleanTitle(title),
+    placeHolder: 'Feature Requests',
+    validateInput: value => cleanTitle(value) ? null : 'Enter a name for the work this session owns.',
     ignoreFocusOut: true,
   });
-  if (title === undefined) return null;
+  if (!cleanTitle(title)) return null;
+  session = await uniqueSessionName(title);
 
   const initialPrompt = await vscode.window.showInputBox({
     title: 'Initial Prompt',
@@ -4365,6 +4635,9 @@ body[data-skin="arcade"][data-motion="subtle"] .kart-layer { display: block; }
 .panel-menu .chime-frequency { width: 100%; max-width: none; }
 .panel-menu input:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 1px; }
 .panel-menu .key-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; }
+.panel-menu .terminal-key-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.panel-menu .terminal-key-grid button { grid-column: span 4; padding-inline: 5px; white-space: nowrap; }
+.panel-menu .terminal-key-grid button:nth-child(-n+4) { grid-column: span 3; }
 .font-controls { display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; gap: 5px; padding: 4px 8px; }
 .font-controls button { text-align: center; }
 .font-controls input { width: 100%; box-sizing: border-box; border: 1px solid var(--skin-border); border-radius: 3px; }
@@ -4390,6 +4663,8 @@ pre {
   overflow-wrap: anywhere;
   cursor: pointer;
 }
+.terminal-file[data-artifact-state="unavailable"] { color: var(--muted, #9ca9bb); text-decoration: underline dotted; }
+.terminal-file[data-artifact-state="unavailable"]::after { content: " [unavailable]"; font-size: .85em; }
 .terminal-output a:hover { text-decoration-thickness: 2px; }
 .terminal-output a:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: 2px; }
 form {
@@ -4400,6 +4675,13 @@ form {
 input, textarea { min-width: 0; border: 0; outline: 0; padding: 0 7px; color: var(--skin-input-text); background: var(--skin-input); }
 .prompt-input { box-sizing: border-box; width: 100%; height: 31px; padding: 5px 7px; line-height: 1.35; resize: none; overflow-y: auto; white-space: pre-wrap; }
 form button { border-width: 0 0 0 1px; }
+.terminal-composer.has-images { grid-template-rows: 40px minmax(0, 1fr); }
+.draft-images { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; padding: 2px 5px; overflow-x: auto; background: var(--skin-input); }
+.draft-image { display: inline-flex; flex: 0 0 auto; align-items: center; height: 34px; border: 1px solid var(--skin-border); border-radius: 3px; }
+.draft-image img { width: 32px; height: 28px; object-fit: contain; margin: 2px; }
+.draft-image button { width: 28px; min-width: 28px; height: 30px; padding: 0; border: 0; }
+.draft-image[data-ready="false"] img { opacity: .5; }
+.draft-image button:focus-visible { outline: 2px solid var(--skin-accent); outline-offset: -2px; }
 .rename-editor {
   position: absolute;
   z-index: 6;
@@ -4528,11 +4810,12 @@ body.holding-open .holding-drawer {
   top: 34px;
   z-index: 2;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding-bottom: 2px;
   background: var(--skin-page);
 }
+.holding-tools input, #holdingBoardFilter { grid-column: 1 / -1; }
 .holding-tools input,
 .holding-tools select {
   width: 100%;
@@ -4594,6 +4877,8 @@ body.holding-open .holding-drawer {
   font-size: 10px;
 }
 .holding-item-actions button { min-width: 0; height: 28px; padding: 0 8px; }
+.holding-restore-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.holding-restore-controls select, .holding-restore-controls button { min-width: 0; height: 32px; }
 .holding-empty {
   min-height: 72px;
   display: grid;
@@ -4664,6 +4949,7 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
     <span class="smoke smoke-2"></span>
     <span class="smoke smoke-3"></span>
   </div>
+  <style>${fs.readFileSync(path.join(__dirname, 'sessionFinder.css'), 'utf8')}</style>
   <nav class="toolbar" aria-label="Board controls" data-menu-version="controls-20260910">
     <button id="toggleToolbar" class="toolbar-toggle command" type="button" title="Hide page controls" aria-label="Hide page controls" aria-expanded="true"><svg class="command-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
     <div class="board-control">
@@ -4674,6 +4960,7 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
       <section id="sessionMenu" class="command-popover" role="dialog" aria-label="New session" hidden>
         <h2>New session</h2><button type="button" id="newClaude">Claude…</button><button type="button" id="newCodex">Codex…</button><button type="button" id="newSession" title="Choose an agent, shell, or preset">Choose session type…</button>
       </section>
+      <button type="button" id="findSession" class="command" aria-label="Find session" title="Find session"><svg class="command-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg><span class="command-label">Find</span></button>
       <button id="toggleHolding" type="button" class="command" title="Open Holding drawer" aria-label="Open Holding drawer" aria-controls="holdingDrawer" aria-expanded="false"><svg class="command-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16l2 12v4H2v-4L4 4Z"/><path d="M2 16h6l2 3h4l2-3h6"/></svg><span class="command-label">Holding</span><span class="command-count" id="toolbarHoldingCount">0</span></button>
       <button type="button" id="toggleMeta" class="command " title="Meta Terminal" aria-label="Meta Terminal" ><svg class="command-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 9 3 3-3 3m6 0h5"/></svg><span class="command-label">Meta Terminal</span></button>
     </div>
@@ -4717,12 +5004,13 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
       </form>
       <div class="board-picker-list" id="boardPickerList" aria-label="Boards"></div>
       <div class="board-picker-footer">
-        <div class="board-management"><button type="button" id="previousBoard">Previous board</button><button type="button" id="newBoard">New…</button><button type="button" id="renameBoard">Rename…</button><button type="button" id="openMap">Git Map ↗</button></div>
+        <div class="board-management"><button type="button" id="previousBoard">Previous board</button><button type="button" id="newBoard">New…</button><button type="button" id="renameBoard">Rename…</button><button type="button" id="openMap">Git Map ↗</button><button type="button" id="openEnvironments">Environments ↗</button></div>
         <label for="boardShortcut">Shortcuts<select id="boardShortcut"><option value="alt">Ctrl + Alt shortcuts</option><option value="ctrl">Ctrl shortcuts</option><option value="off">Off</option></select></label>
         <span id="boardShortcutHint">Ctrl+B / Ctrl+Shift+B: next · Ctrl+V: back</span>
       </div>
     </section>
   </div>
+  ${fs.readFileSync(path.join(__dirname, 'sessionFinder.html'), 'utf8')}
   <textarea id="clipboardProxy" class="clipboard-proxy" aria-hidden="true" tabindex="-1" autocomplete="off"></textarea>
   ${fs.readFileSync(path.join(__dirname, 'panelHealth.html'), 'utf8')}
   <dialog id="sessionMemoryDialog" class="session-memory-dialog" aria-labelledby="sessionMemoryTitle">
@@ -4749,6 +5037,7 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
       </div>
       <div class="holding-tools">
         <input id="holdingSearch" autocomplete="off" placeholder="Search Holding" aria-label="Search Holding">
+        <select id="holdingBoardFilter" title="Filter Holding by board" aria-label="Filter Holding by board"><option value="all">All boards</option></select>
         <select id="holdingFilter" title="Filter Holding sessions" aria-label="Filter Holding sessions">
           <option value="all">All</option>
           <option value="claude">Claude</option>
@@ -4781,6 +5070,8 @@ window.terminalTownHealthUiBuild = ${JSON.stringify(require('./panelHealth').fro
 const vscode = acquireVsCodeApi();
 ${fs.readFileSync(path.join(__dirname, 'preferenceSchema.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'preferences.js'), 'utf8')}
+${fs.readFileSync(path.join(__dirname, 'artifactReferences.js'), 'utf8')}
+${fs.readFileSync(path.join(__dirname, 'artifactLinksClient.js'), 'utf8')}
 const preferenceRequests = new Map();
 let preferenceRequestId = 0;
 const preferenceStorage = createPreferenceStorage(async request => {
@@ -4819,6 +5110,7 @@ const closeHoldingButton = document.getElementById('closeHolding');
 const holdingTabButton = document.getElementById('holdingTab');
 const holdingSearch = document.getElementById('holdingSearch');
 const holdingFilter = document.getElementById('holdingFilter');
+const holdingBoardFilter = document.getElementById('holdingBoardFilter');
 const holdingSort = document.getElementById('holdingSort');
 const holdingCount = document.getElementById('holdingCount');
 const holdingTabCount = document.getElementById('holdingTabCount');
@@ -4934,6 +5226,7 @@ let holdingBoards = [];
 let holdingMembership = {};
 let holdingQuery = preferenceStorage.getItem('terminaltown-holding-query') || '';
 let holdingFilterValue = preferenceStorage.getItem('terminaltown-holding-filter') || 'all';
+let holdingBoardFilterValue = preferenceStorage.getItem('terminaltown-holding-board-filter') || 'all';
 let holdingSortValue = preferenceStorage.getItem('terminaltown-holding-sort') || 'recent';
 let audioCtx = null;
 let audioReady = false;
@@ -5057,6 +5350,11 @@ holdingFilter.addEventListener('change', () => {
   preferenceStorage.setItem('terminaltown-holding-filter', holdingFilterValue);
   renderHoldingList();
 });
+holdingBoardFilter.addEventListener('change', () => {
+  holdingBoardFilterValue = holdingBoardFilter.value || 'all';
+  preferenceStorage.setItem('terminaltown-holding-board-filter', holdingBoardFilterValue);
+  renderHoldingList();
+});
 holdingSort.addEventListener('change', () => {
   holdingSortValue = holdingSort.value || 'recent';
   preferenceStorage.setItem('terminaltown-holding-sort', holdingSortValue);
@@ -5086,7 +5384,7 @@ document.getElementById('layoutNoticeDismiss').addEventListener('click', () => {
 });
 layoutNoticeHolding.addEventListener('click', () => {
   // A previous search or session filter must not conceal the session just parked.
-  holdingQuery = layoutHeldSession; holdingFilterValue = 'all';
+  holdingQuery = layoutHeldSession; holdingFilterValue = 'all'; resetHoldingBoardFilter();
   holdingSearch.value = holdingQuery; holdingFilter.value = 'all';
   preferenceStorage.setItem('terminaltown-holding-query', holdingQuery);
   preferenceStorage.setItem('terminaltown-holding-filter', 'all');
@@ -5185,7 +5483,7 @@ function flushPanelActions() {
 let metaFollowOutput = true;
 function setMetaOpen(open) { if (!open) { closePanelMenu(); (isMobileView() ? document.getElementById('mobileControlsButton') : toggleMetaButton).focus({ preventScroll: true }); } toggleMetaButton.setAttribute('aria-expanded', String(Boolean(open))); toggleMetaButton.setAttribute('aria-controls', 'metaTerminal'); metaTerminal.classList.toggle('open', Boolean(open)); metaTerminal.setAttribute('aria-hidden', open ? 'false' : 'true'); if (open) { if (isMobileView()) installMobileIosInputScaling(metaTerminal); requestAnimationFrame(() => resizePromptInput(metaGoal)); metaStatus.textContent = 'Starting…'; if (metaTranscript && !metaTranscript.textContent.trim()) metaTranscript.textContent = 'Starting Meta Terminal…'; if (window.terminalTownBrowserHost) post('metaEnsure'); setTimeout(() => (isMobileView() ? closeMetaButton : metaGoal).focus({ preventScroll: true }), 0); } }
 function setMetaDock(dock) { const next = dock === 'bottom' ? 'bottom' : 'side'; metaTerminal.classList.toggle('side', next === 'side'); metaTerminal.classList.toggle('bottom', next === 'bottom'); preferenceStorage.setItem('terminaltown-meta-dock', next); metaSideButton.setAttribute('aria-pressed', String(next === 'side')); metaBottomButton.setAttribute('aria-pressed', String(next === 'bottom')); }
-function updateMetaTranscript(output) { if (!metaTranscript || !output) return; updateTerminalViewport(metaTranscript, output, 'meta:' + activeRenderedBoardId, metaFollowOutput, 'agent'); }
+function updateMetaTranscript(output, basePath = '') { if (!metaTranscript || !output) return; updateTerminalViewport(metaTranscript, output, 'meta:' + activeRenderedBoardId, metaFollowOutput, 'agent', basePath); }
 let pendingMetaDraft = null;
 let metaSendError = '';
 async function metaSubmitPrompt(submitKey) {
@@ -5316,11 +5614,29 @@ function resizePromptInput(input) {
     iosWrapper.style.setProperty('--ios-input-visual-height', (height - 1) + 'px');
     input.style.setProperty('height', (height - 1) + 'px', 'important');
   } else input.style.height = (height - 1) + 'px';
-  tile.style.setProperty('--prompt-height', height + 'px');
+  tile.style.setProperty('--prompt-height', (height + (tile.querySelector('.draft-images') ? 40 : 0)) + 'px');
   scheduleTileGeometryRefresh();
 }
 function bindPromptInput(input, submit) {
   input.addEventListener('input', () => resizePromptInput(input));
+  input.addEventListener('paste', ev => {
+    if (ev.defaultPrevented || !input.isConnected || input.disabled || input.readOnly) return;
+    const clipboard = ev.clipboardData;
+    if (!clipboard || Array.from(clipboard.items || []).some(item => item.type.startsWith('image/'))) return;
+    const text = clipboard.getData('text/plain');
+    if (!text) return;
+    // Snapshot and insert during paste: with dictation, clipboard text can be
+    // present here but missing from the browser's later native insertion.
+    ev.preventDefault();
+    let inserted = false;
+    if (document.activeElement === input) {
+      try { inserted = document.execCommand('insertText', false, text); } catch {}
+    }
+    if (!inserted) {
+      input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
   input.addEventListener('keydown', ev => {
     ev.stopPropagation();
     if (ev.isComposing || ev.keyCode === 229) return;
@@ -5336,6 +5652,8 @@ function submitPrompt(slot, submitKey) {
   const el = tiles.get(slot);
   const input = el && el.querySelector('.prompt-input');
   const prompt = input ? input.value.trim() : '';
+  const draft = imageDrafts.get(imageDraftKey(slot));
+  if (draft?.length) { submitImageDraft(slot, submitKey || 'enter', prompt); return; }
   if (!prompt) {
     post('key', { slot, key: submitKey || 'enter' });
     return;
@@ -5432,6 +5750,101 @@ function fileToDataUrl(file) {
     reader.readAsDataURL(file);
   });
 }
+const imageDrafts = new Map();
+const imageStages = new Map();
+const imageSends = new Map();
+let imageDraftSerial = 0;
+function imageDraftKey(slot) { return currentBoardId() + ':' + (slotSessions[slot] || ''); }
+function imageDraftPreview(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const scale = Math.min(1, 64 / img.width, 56 / img.height);
+      canvas.width = Math.max(1, Math.round(img.width * scale)); canvas.height = Math.max(1, Math.round(img.height * scale));
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+function renderImageDraft(slot) {
+  const tile = tiles.get(slot), form = tile?.querySelector('.terminal-composer');
+  if (!form) return;
+  const key = imageDraftKey(slot), entries = imageDrafts.get(key) || [];
+  const busy = [...imageSends.values()].some(send => send.key === key);
+  form.querySelector('button[type="submit"]').disabled = busy;
+  form.classList.toggle('has-images', Boolean(entries.length));
+  let tray = form.querySelector('.draft-images');
+  if (!entries.length) { if (tray) { tray.remove(); resizePromptInput(form.querySelector('.prompt-input')); } return; }
+  if (!tray) { tray = document.createElement('div'); tray.className = 'draft-images'; tray.setAttribute('role', 'group'); tray.setAttribute('aria-label', 'Draft images'); form.prepend(tray); }
+  const signature = JSON.stringify([entries, busy]);
+  if (tray.dataset.signature !== signature) {
+    tray.replaceChildren(); tray.dataset.signature = signature;
+    entries.forEach((entry, index) => {
+      const chip = document.createElement('span'); chip.className = 'draft-image'; chip.dataset.ready = String(Boolean(entry.path));
+      const img = document.createElement('img'); img.alt = 'Pasted image ' + (index + 1); if (entry.preview) img.src = entry.preview;
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.disabled = busy;
+      remove.setAttribute('aria-label', 'Remove image ' + (index + 1)); remove.title = 'Remove image ' + (index + 1);
+      remove.addEventListener('click', () => {
+        imageDrafts.set(key, (imageDrafts.get(key) || []).filter(image => image.id !== entry.id));
+        renderAllImageDrafts(); saveBoardDrafts();
+        const next = form.querySelectorAll('.draft-image button');
+        (next[Math.min(index, next.length - 1)] || form.querySelector('.prompt-input')).focus({ preventScroll: true });
+      });
+      chip.append(img, remove); tray.append(chip);
+    });
+  }
+  resizePromptInput(form.querySelector('.prompt-input'));
+}
+function renderAllImageDrafts() { for (const [slot] of tiles) renderImageDraft(slot); }
+function finishImageStage(message) {
+  const stage = imageStages.get(message.stageId);
+  if (!stage) return;
+  imageStages.delete(message.stageId);
+  if (message.ok) stage.entries.forEach((entry, index) => { entry.path = message.files[index] || ''; });
+  else note(message.error || 'Image upload failed. Remove it and paste again.');
+  renderAllImageDrafts(); saveBoardDrafts();
+}
+async function acceptClipboardImageDraft(message) {
+  if (!message.images?.length) { note('Clipboard has no usable text or image.'); return; }
+  const key = currentBoardId() + ':' + message.session;
+  const entries = imageDrafts.get(key) || [];
+  if (entries.length + message.images.length > 8) { note('A draft can contain up to 8 images.'); return; }
+  const additions = message.images.map(image => ({ id: 'host-' + Date.now() + '-' + (++imageDraftSerial), path: image.path, preview: '' }));
+  imageDrafts.set(key, entries.concat(additions));
+  const previews = await Promise.all(message.images.map(image => imageDraftPreview(image.dataUrl)));
+  additions.forEach((entry, index) => { entry.preview = previews[index]; });
+  renderAllImageDrafts(); saveBoardDrafts();
+}
+async function submitImageDraft(slot, submitKey, prompt) {
+  if (!['enter', 'tab'].includes(submitKey)) return;
+  const key = imageDraftKey(slot), entries = imageDrafts.get(key) || [];
+  if ([...imageSends.values()].some(send => send.key === key)) return;
+  if (entries.some(entry => !entry.path)) { note('Wait for image uploads to finish, or remove them.'); return; }
+  const draftId = 'send-' + Date.now() + '-' + (++imageDraftSerial);
+  const session = slotSessions[slot];
+  imageSends.set(draftId, { key, session, prompt, ids: entries.map(entry => entry.id) });
+  renderImageDraft(slot);
+  const text = [prompt, ...entries.map(entry => JSON.stringify(entry.path))].filter(Boolean).join(String.fromCharCode(10));
+  const result = await post('prompt', { slot, session, draftId, prompt: text, submitKey });
+  if (result?.ok === false) finishImageSend({ draftId, ok: false, error: 'Send failed; your draft was kept.' });
+}
+function finishImageSend(message) {
+  const send = imageSends.get(message.draftId);
+  if (!send) return;
+  imageSends.delete(message.draftId);
+  if (message.ok) {
+    imageDrafts.set(send.key, (imageDrafts.get(send.key) || []).filter(entry => !send.ids.includes(entry.id)));
+    for (const [slot, tile] of tiles) if (imageDraftKey(slot) === send.key) {
+      const input = tile.querySelector('.prompt-input'); if (input.value.trim() === send.prompt) input.value = '';
+      resizePromptInput(input);
+    }
+    burstRefresh();
+  } else note(message.error || 'Send failed; your draft was kept.');
+  renderAllImageDrafts(); saveBoardDrafts();
+}
 async function clipboardImagesFromItems(items) {
   const images = [];
   for (const item of Array.from(items || [])) {
@@ -5444,10 +5857,22 @@ async function clipboardImagesFromItems(items) {
 }
 async function pasteImagesToSlot(slot, images) {
   if (!images || !images.length) return false;
-  setSelected(slot);
-  post('pasteImages', { slot, images });
-  note('Saving image paste for slot ' + (slot + 1) + '...');
-  burstRefresh();
+  const session = slotSessions[slot];
+  if (!session || session === LARSON_DESKTOP_SESSION) { note('Choose a terminal panel before pasting images.'); return false; }
+  const key = imageDraftKey(slot);
+  const draft = imageDrafts.get(key) || [];
+  if (draft.length + images.length > 8) { note('A draft can contain up to 8 images.'); return false; }
+  if (images.reduce((sum, image) => sum + String(image.dataUrl || '').length, 0) > 16 * 1024 * 1024) { note('Images are too large to paste together.'); return false; }
+  const stageId = 'image-' + Date.now() + '-' + (++imageDraftSerial);
+  const entries = images.map((image, index) => ({ id: stageId + '-' + index, preview: '', path: '' }));
+  imageDrafts.set(key, draft.concat(entries));
+  imageStages.set(stageId, { key, entries });
+  renderImageDraft(slot);
+  const previews = await Promise.all(images.map(image => imageDraftPreview(image.dataUrl)));
+  entries.forEach((entry, index) => { entry.preview = previews[index]; });
+  renderAllImageDrafts();
+  const result = await post('stageImages', { slot, session, stageId, images });
+  if (result?.ok === false) finishImageStage({ stageId, ok: false, error: 'Image upload failed. Remove it and paste again.' });
   return true;
 }
 async function readClipboardAndPaste(slot) {
@@ -6165,7 +6590,7 @@ function updateTerminalViewport(pre, text, sessionKey, forceFollow = false, disp
   if (!sameSession) pre._terminaltownHealthReading = false;
   pre._terminaltownSessionKey = sessionKey;
   pre._terminaltownPendingOutput = null;
-  if (sameSession && !forceFollow && pre._terminaltownRawOutput === String(text || '') && pre._terminaltownDisplayMode === displayMode) return;
+  if (sameSession && !forceFollow && pre._terminaltownRawOutput === String(text || '') && pre._terminaltownDisplayMode === displayMode && pre._terminaltownBasePath === basePath) return;
   renderTerminalOutput(pre, text, displayMode, basePath);
   pre.scrollTop = pre.scrollHeight;
 }
@@ -6187,61 +6612,90 @@ function stripPastedPromptGutters(value) {
   return formatted.join('\\n');
 }
 function terminalFileHref(rawPath, basePath) {
-  let filePath = String(rawPath || '').replace(/[ \\t]*\\r?\\n\\s+/g, '');
-  if (filePath.startsWith('~/')) filePath = path.join(os.homedir(), filePath.slice(2));
-  else if (!filePath.startsWith('/')) {
-    const base = String(basePath || '').replace(/\\/+$/, '');
-    if (!base) return '';
-    filePath = base + '/' + filePath;
-  }
-  const parts = [];
-  for (const part of filePath.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') { if (parts.length) parts.pop(); continue; }
-    parts.push(part);
-  }
-  if (window.terminalTownBrowserHost) {
-    return '/api/terminal-file?path=' + encodeURIComponent(filePath);
-  }
-  return 'file:///' + parts.map(encodeURIComponent).join('/');
+  const ref = TerminalTownArtifactReferences.parseReference(rawPath,basePath);
+  if (!ref) return '';
+  return window.terminalTownBrowserHost ? TerminalTownArtifactReferences.hrefFor(ref) : 'file://' + ref.path.split('/').map(encodeURIComponent).join('/') + (ref.fragment ? '#' + ref.fragment : '');
 }
 function renderTerminalOutput(pre, text, displayMode = '', basePath = '') {
   const rawValue = String(text || '');
-  if (pre._terminaltownRawOutput === rawValue && pre._terminaltownDisplayMode === displayMode) return;
+  if (pre._terminaltownRawOutput === rawValue && pre._terminaltownDisplayMode === displayMode && pre._terminaltownBasePath === basePath) return;
   pre._terminaltownRawOutput = rawValue;
   pre._terminaltownDisplayMode = displayMode;
+  pre._terminaltownBasePath = basePath;
   // capture-pane -J has already joined tmux's soft-wrapped terminal lines.
   // Reflowing again here made a newly captured response change its displayed height.
   const value = displayMode === 'agent' ? stripPastedPromptGutters(rawValue) : rawValue;
   pre.textContent = '';
   const fragment = document.createDocumentFragment();
   const httpRe = /https?:\\/\\/[^\\s<>"']+/g;
-  const fileRe = /(^|[\\s([{"'•])((?:\\/(?:Users|Volumes|private|tmp)\\/|~\\/|(?:docs|assets|src|scripts|data)\\/)[A-Za-z0-9._~\\/-]+(?:[ \\t]*\\n\\s{2,}[A-Za-z0-9._~\\/-]+)*\\.[A-Za-z0-9]{1,16})(?=[\\s),.;:!?]|$)/gm;
+
+  // Agent TUIs hard-wrap parenthesized/angle-bracket URLs, including padding.
+  // Require an enclosing delimiter and URL-only continuation lines so ordinary
+  // prose below a bare URL cannot silently become part of its destination.
+  const wrappedHttpRe = /([(<])(https?:\\/\\/[^\\s<>"'()]*(?:[ \\t]*\\r?\\n[ \\t]{2,}[^\\s<>"'()]+)+)([)>])/g;
   const matches = [];
   let match;
-  while ((match = httpRe.exec(value))) matches.push({ index: match.index, end: match.index + match[0].length, raw: match[0], kind: 'http' });
-  while ((match = fileRe.exec(value))) {
+  while ((match = wrappedHttpRe.exec(value))) {
+    if ((match[1] === '(' && match[3] !== ')') || (match[1] === '<' && match[3] !== '>')) continue;
     const raw = match[2];
-    const href = terminalFileHref(raw, basePath);
-    if (href) matches.push({ index: match.index + match[1].length, end: match.index + match[0].length, raw, href, kind: 'file' });
+    matches.push({ index: match.index + 1, end: match.index + 1 + raw.length,
+      raw, href: raw.replace(/[ \\t]*\\r?\\n[ \\t]+/g, ''), kind: 'http' });
   }
-  matches.sort((left, right) => left.index - right.index || left.end - right.end);
+  // Bare TUI screenshot/report links have no enclosing delimiter. Recover a
+  // concrete resource across indented hard wraps, stopping at its filename;
+  // never append prose to an already complete link or consume a following URL.
+  const completeResource = href => {
+    try { return /\\.(?:png|jpe?g|gif|webp|svg|avif|pdf|html?|md|txt|json|csv|log|zip|docx?|xlsx?|pptx?)(?:$)/i.test(new URL(href).pathname); }
+    catch { return false; }
+  };
+  const bareWrappedHttpRe = /https?:\\/\\/[^\\s<>"'()]*(?:[ \\t]*\\r?\\n[ \\t]{2,}[^\\s<>"'()]+)+/g;
+  while ((match = bareWrappedHttpRe.exec(value))) {
+    const parts = match[0].split(/([ \\t]*\\r?\\n[ \\t]{2,})/);
+    let raw = parts[0], href = raw;
+    if (completeResource(href.replace(/[),.;:!?\\]]+$/, '')) && !/[?&=#%]$/.test(href)) continue;
+    for (let index = 2; index < parts.length; index += 2) {
+      if (/^https?:\\/\\//.test(parts[index])) break;
+      raw += parts[index - 1] + parts[index]; href += parts[index];
+      const suffix = (href.match(/[),.;:!?\\]]+$/) || [''])[0];
+      const destination = suffix ? href.slice(0, -suffix.length) : href;
+      if (!completeResource(destination)) continue;
+      const text = suffix ? raw.slice(0, -suffix.length) : raw;
+      matches.push({ index: match.index, end: match.index + text.length, raw: text, href: destination, kind: 'http' });
+      break;
+    }
+  }
+  while ((match = httpRe.exec(value))) matches.push({ index: match.index, end: match.index + match[0].length, raw: match[0], kind: 'http' });
+  matches.push(...TerminalTownArtifactReferences.findReferences(value,basePath));
+  if (window.terminalTownBrowserHost) {
+    for (const item of matches) {
+      if (item.kind !== 'http') continue;
+      try {
+        const url = new URL(item.href || item.raw.replace(/[),.;:!?\\]]+$/, ''),location.href);
+        if (url.pathname !== '/api/terminal-file' || url.hostname !== location.hostname) continue;
+        const ref = TerminalTownArtifactReferences.referenceFromFileUrl(url.href);
+        if (ref) { item.reference=ref;item.kind='file'; }
+
+      } catch {}
+    }
+  }
+  matches.sort((left, right) => left.index - right.index || right.end - left.end);
   let lastIndex = 0;
   for (const item of matches) {
     if (item.index < lastIndex) continue;
     if (item.index > lastIndex) fragment.appendChild(document.createTextNode(value.slice(lastIndex, item.index)));
     const raw = item.raw;
-    const trailing = item.kind === 'http' ? raw.match(/[),.;:!?\\]]+$/) : null;
+    const trailing = item.kind === 'http' && !item.href ? raw.match(/[),.;:!?\\]]+$/) : null;
     const suffix = trailing ? trailing[0] : '';
     const href = item.href || (suffix ? raw.slice(0, -suffix.length) : raw);
-    const link = document.createElement('a');
-    link.href = href;
-    link.textContent = href;
-    if (item.kind === 'file') link.textContent = raw;
+    const gated = item.kind === 'file' && window.terminalTownBrowserHost;
+    const link = document.createElement(gated ? 'span' : 'a');
+    if (!gated) link.href = item.kind === 'file' ? terminalFileHref(item.raw,basePath) : href;
+    link.textContent = suffix ? raw.slice(0, -suffix.length) : raw;
     link.title = 'Open ' + (item.kind === 'file' ? raw.replace(/[ \\t]*\\r?\\n\\s+/g, '') : href);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     fragment.appendChild(link);
+    if (gated) terminalArtifactLinks.bind(link,item.reference);
     if (suffix) fragment.appendChild(document.createTextNode(suffix));
     lastIndex = item.end;
   }
@@ -6720,7 +7174,7 @@ function createTile(slot) {
   el.className = 'tile';
   if (isMobileView() && mobileAll) el.classList.add('mobile-visible');
   el.dataset.slot = String(slot);
-  el.innerHTML = '<div class="resize-edge resize-top" title="Drag up to span upward; drag down to shrink"></div><div class="resize-edge resize-bottom" title="Drag down to span downward; drag up to shrink"></div><div class="head" draggable="true"><div class="head-main"><input type="checkbox" class="font-select"><span class="idx"></span><span class="name"></span><button type="button" class="memory-badge" title="Open saved session memory">Memory saved</button><span class="meta"></span></div><div class="head-actions"><button type="button" class="esc" title="Send Escape" aria-label="Send Escape">Esc</button><button type="button" class="paste icon-button" data-icon="paste" title="Paste clipboard text or image path" aria-label="Paste into terminal"></button><button type="button" class="tools-toggle icon-button" data-icon="more" title="Panel controls" aria-label="Panel controls" aria-haspopup="dialog" aria-expanded="false"><span class="tools-label">Assign</span></button></div><section class="command-popover panel-menu" popover="manual" role="dialog" aria-label="Panel controls" hidden><h2 class="panel-menu-title">Panel controls</h2><h2>Terminal keys</h2><div class="key-grid"><button type="button" class="up" title="Send Up arrow" aria-label="Send Up arrow">↑</button><button type="button" class="down" title="Send Down arrow" aria-label="Send Down arrow">↓</button><button type="button" class="left" title="Send Left arrow" aria-label="Send Left arrow">←</button><button type="button" class="right" title="Send Right arrow" aria-label="Send Right arrow">→</button><button type="button" class="space" title="Send Space">Space</button><button type="button" class="enter" title="Send Enter without submitting the draft">Enter ↵</button><button type="button" class="tab" title="Send draft with Tab, or send Tab">Tab ⇥</button><button type="button" class="shiftTab" title="Send Shift+Tab">Shift+Tab ⇤</button><button type="button" class="ctrlc" title="Interrupt the running command">Interrupt · Ctrl+C</button></div><hr><div class="panel-font"><h2>Text size (px)</h2><div class="font-controls"><button type="button" class="font-decrease" aria-label="Decrease panel text size">−</button><input type="number" class="font-size" min="8" max="40" step="1" aria-label="Panel text size in pixels"><button type="button" class="font-increase" aria-label="Increase panel text size">+</button></div></div><button type="button" class="copy">Copy selected text / output</button><button type="button" class="openTerm">Open in Mac Terminal ↗</button><hr><h2>Session</h2><label class="assign-field">Assign<select class="assign-session" aria-label="Assign session" title="Assign session"></select></label><label>Board<select class="move-board" title="Change board assignment" aria-label="Change board assignment"></select></label><button type="button" class="memory">Session memory…</button><button type="button" class="rename">Rename label…</button><button type="button" class="hold">Move to Holding</button><hr><button type="button" class="bye danger-command" title="Permanently end this tmux session after confirmation">End session…</button></section></div><pre class="terminal-output"></pre><section class="codex-question" role="region" aria-label="Codex question" aria-live="polite" hidden><form class="codex-question-form"></form></section><form class="terminal-composer"><textarea class="prompt-input" rows="1" autocomplete="off" placeholder="Prompt" aria-description="Enter to send; Shift+Enter for a new line"></textarea><button type="submit">Send</button></form>';
+  el.innerHTML = '<div class="resize-edge resize-top" title="Drag up to span upward; drag down to shrink"></div><div class="resize-edge resize-bottom" title="Drag down to span downward; drag up to shrink"></div><div class="head" draggable="true"><div class="head-main"><input type="checkbox" class="font-select"><span class="idx"></span><span class="name"></span><button type="button" class="memory-badge" title="Open saved session memory">Memory saved</button><span class="meta"></span></div><div class="head-actions"><button type="button" class="esc" title="Send Escape" aria-label="Send Escape">Esc</button><button type="button" class="paste icon-button" data-icon="paste" title="Paste clipboard text or image path" aria-label="Paste into terminal"></button><button type="button" class="tools-toggle icon-button" data-icon="more" title="Panel controls" aria-label="Panel controls" aria-haspopup="dialog" aria-expanded="false"><span class="tools-label">Assign</span></button></div><section class="command-popover panel-menu" popover="manual" role="dialog" aria-label="Panel controls" hidden><h2 class="panel-menu-title">Panel controls</h2><h2>Terminal keys</h2><div class="key-grid terminal-key-grid"><button type="button" class="up" title="Send Up arrow" aria-label="Send Up arrow">↑</button><button type="button" class="down" title="Send Down arrow" aria-label="Send Down arrow">↓</button><button type="button" class="left" title="Send Left arrow" aria-label="Send Left arrow">←</button><button type="button" class="right" title="Send Right arrow" aria-label="Send Right arrow">→</button><button type="button" class="space" title="Send Space">Space</button><button type="button" class="enter" title="Send Enter without submitting the draft">Enter ↵</button><button type="button" class="tab" title="Send draft with Tab, or send Tab">Tab ⇥</button><button type="button" class="shiftTab" title="Send Shift+Tab">Shift+Tab ⇤</button><button type="button" class="answerQuestion" title="Open queued Codex question · Shift+Left Arrow" aria-label="Open queued Codex question (Shift+Left Arrow)">Answer ⇧←</button><button type="button" class="ctrlc" title="Interrupt the running command">Interrupt · Ctrl+C</button></div><hr><div class="panel-font"><h2>Text size (px)</h2><div class="font-controls"><button type="button" class="font-decrease" aria-label="Decrease panel text size">−</button><input type="number" class="font-size" min="8" max="40" step="1" aria-label="Panel text size in pixels"><button type="button" class="font-increase" aria-label="Increase panel text size">+</button></div></div><button type="button" class="copy">Copy selected text / output</button><button type="button" class="openTerm">Open in Mac Terminal ↗</button><hr><h2>Session</h2><label class="assign-field">Assign<select class="assign-session" aria-label="Assign session" title="Assign session"></select></label><label>Board<select class="move-board" title="Change board assignment" aria-label="Change board assignment"></select></label><button type="button" class="memory">Session memory…</button><button type="button" class="rename">Rename label…</button><button type="button" class="hold">Move to Holding</button><hr><button type="button" class="bye danger-command" title="Permanently end this tmux session after confirmation">End session…</button></section></div><pre class="terminal-output"></pre><section class="codex-question" role="region" aria-label="Codex question" aria-live="polite" hidden><form class="codex-question-form"></form></section><form class="terminal-composer"><textarea class="prompt-input" rows="1" autocomplete="off" placeholder="Prompt" aria-description="Enter to send; Shift+Enter for a new line"></textarea><button type="submit">Send</button></form>';
   el.querySelector('.ctrlc').textContent = 'Ctrl+C';
   el.querySelector('.ctrlc').setAttribute('aria-label', 'Interrupt with Ctrl+C');
   el.querySelector('.shiftTab').textContent = '⇧Tab';
@@ -6819,6 +7273,7 @@ function createTile(slot) {
   el.querySelector('.hold').addEventListener('click', () => post('assign', { slot, session: '' }));
   el.querySelector('.bye').addEventListener('click', () => browserConfirmBye(slot));
   el.querySelector('.shiftTab').addEventListener('click', () => post('key', { slot, key: 'shift-tab' }));
+  el.querySelector('.answerQuestion').addEventListener('click', () => post('key', { slot, key: 'shift-left' }));
   el.querySelector('.tab').addEventListener('click', () => submitPrompt(slot, 'tab'));
   el.querySelector('.enter').addEventListener('click', () => post('key', { slot, key: 'enter' }));
   for (const key of ['up', 'down', 'left', 'right', 'space']) el.querySelector('.' + key).addEventListener('click', () => post('key', { slot, key }));
@@ -7033,6 +7488,8 @@ function render(data, optimistic = false) {
   rememberCurrentBoard(data.board);
   if (mobileReady) renderMobile(data);
   if (firstBoardRender) restoreBoardDrafts();
+  renderAllImageDrafts();
+  applySessionFocus();
   note(data.error ? data.error : gridShape + ' updated ' + new Date(data.at || Date.now()).toLocaleTimeString());
   if (layoutChanged) setTimeout(() => requestRefresh({ force: true }), 40);
   if (!optimistic) acknowledgeRender(data, true);
@@ -7046,7 +7503,7 @@ function renderHolding(names, data = {}) {
   // Also defend against older hosts that send their complete session inventory.
   const placed = new Set(slotSessions.filter(Boolean));
   holdingNames = Array.isArray(names) ? [...new Set(names)].filter(name =>
-    !String(name || '').startsWith('terminaltown-meta-') && !placed.has(name) && !(holdingMembership[name] || []).length) : [];
+    !String(name || '').startsWith('terminaltown-meta-') && !placed.has(name) && !(holdingMembership[name] || []).some(board => !board.held)) : [];
   renderHoldingList();
 }
 function setHoldingOpen(open, persist = true) {
@@ -7073,7 +7530,7 @@ function holdingKind(name, title) {
   return 'other';
 }
 function holdingRecord(name, index) {
-  const title = titles[name] || name;
+  const title = name === LARSON_DESKTOP_SESSION ? 'Larson Desktop' : titles[name] || name;
   const boards = Array.isArray(holdingMembership[name]) ? holdingMembership[name] : [];
   const boardIds = boards.map((board) => String(board.id || '')).filter(Boolean);
   const boardText = boards.map((board) => String(board.title || board.id || '')).filter(Boolean).join(', ');
@@ -7084,11 +7541,31 @@ function holdingRecord(name, index) {
     kind: holdingKind(name, title),
     boardIds,
     boardText,
-    search: (String(name || '') + ' ' + String(title || '') + ' ' + boardText + ' ' + boardIds.join(' ')).toLowerCase(),
+    search: (String(name || '') + ' ' + (name === LARSON_DESKTOP_SESSION ? 'Larson Remote ' : '') + String(title || '') + ' ' + boardText + ' ' + boardIds.join(' ')).toLowerCase(),
   };
+}
+const holdingRestoreSlots = new Map();
+function resetHoldingBoardFilter() {
+  holdingBoardFilterValue = 'all';
+  preferenceStorage.setItem('terminaltown-holding-board-filter', 'all');
+}
+function renderHoldingBoardFilter() {
+  const choices = [{ value: 'all', title: 'All boards' }, { value: 'unassigned', title: 'Unassigned' }]
+    .concat(holdingBoards.map(board => ({ value: 'board:' + board.id, title: board.title || board.id })));
+  if (!choices.some(choice => choice.value === holdingBoardFilterValue)) resetHoldingBoardFilter();
+  const signature = JSON.stringify(choices);
+  if (holdingBoardFilter.dataset.choices !== signature) {
+    holdingBoardFilter.replaceChildren(...choices.map(choice => {
+      const option = document.createElement('option');
+      option.value = choice.value; option.textContent = choice.title; return option;
+    }));
+    holdingBoardFilter.dataset.choices = signature;
+  }
+  holdingBoardFilter.value = holdingBoardFilterValue;
 }
 function renderHoldingList() {
   holding.innerHTML = '';
+  renderHoldingBoardFilter();
   const query = String(holdingQuery || '').trim().toLowerCase();
   const filter = ['all', 'claude', 'codex', 'other'].includes(holdingFilterValue) ? holdingFilterValue : 'all';
   const sort = ['recent', 'title', 'name'].includes(holdingSortValue) ? holdingSortValue : 'recent';
@@ -7096,6 +7573,8 @@ function renderHoldingList() {
   if (holdingSort && holdingSort.value !== sort) holdingSort.value = sort;
 
   let records = holdingNames.map(holdingRecord)
+    .filter(record => holdingBoardFilterValue === 'all' || (holdingBoardFilterValue === 'unassigned'
+      ? !record.boardIds.length : record.boardIds.includes(holdingBoardFilterValue.slice(6))))
     .filter((record) => filter === 'all' || record.kind === filter)
     .filter((record) => !query || record.search.includes(query));
   if (sort === 'title') {
@@ -7157,8 +7636,10 @@ function renderHoldingList() {
       field.append(label, input);
       fields.appendChild(field);
     };
+    const remote = name === LARSON_DESKTOP_SESSION;
     addField('Display name', record.title, 'holding-field-display', (title) => post('renameHeld', { session: name, title }));
-    addField('TMUX name', name, 'holding-field-tmux', (nextName) => post('renameTmuxHeld', { session: name, nextName }));
+    if (remote) fields.querySelector('input').readOnly = true;
+    if (!remote) addField('TMUX name', name, 'holding-field-tmux', (nextName) => post('renameTmuxHeld', { session: name, nextName }));
     const actions = document.createElement('div');
     actions.className = 'holding-item-actions';
     const boardSelect = document.createElement('select');
@@ -7173,8 +7654,42 @@ function renderHoldingList() {
     remove.addEventListener('click', () => {
       if (!window.terminalTownBrowserHost || confirm('End and delete tmux session ' + name + ' from every board?')) post('deleteHeld', { session: name });
     });
-    actions.append(boardSelect, remove);
-    item.append(fields, actions);
+    if (remote) {
+      const open = document.createElement('a'); open.href = larsonRemotePageUrl(); open.textContent = 'Open ↗'; open.setAttribute('aria-label', 'Open Larson Remote');
+      open.addEventListener('click', event => { if (!window.terminalTownBrowserHost) { event.preventDefault(); post('openExternal', {url:open.href}); } });
+      actions.append(boardSelect, open);
+    } else actions.append(boardSelect, remove);
+    const restore = document.createElement('div');
+    restore.className = 'holding-restore-controls';
+    const panelSelect = document.createElement('select');
+    panelSelect.className = 'holding-panel-select';
+    panelSelect.setAttribute('aria-label', 'Panel on current board');
+    for (let slot = 0; slot < slotSessions.length; slot += 1) {
+      if (tiles.get(slot)?.classList.contains('covered')) continue;
+      const option = document.createElement('option');
+      option.value = String(slot);
+      option.textContent = 'Panel ' + (slot + 1) + (slotSessions[slot] ? ' · ' + (titles[slotSessions[slot]] || slotSessions[slot]) : ' · Empty');
+      panelSelect.appendChild(option);
+    }
+    const emptySlot = Array.from(panelSelect.options).find(option => !slotSessions[Number(option.value)]);
+    const restoreKey = activeRenderedBoardId + ':' + name;
+    const savedSlot = holdingRestoreSlots.get(restoreKey);
+    if (Array.from(panelSelect.options).some(option => option.value === savedSlot)) panelSelect.value = savedSlot;
+    else if (emptySlot) panelSelect.value = emptySlot.value;
+    panelSelect.addEventListener('change', () => holdingRestoreSlots.set(restoreKey, panelSelect.value));
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'holding-restore';
+    add.textContent = 'Add to board';
+    add.disabled = !panelSelect.options.length;
+    add.addEventListener('click', () => {
+      const slot = Number(panelSelect.value);
+      const displaced = slotSessions[slot];
+      if (displaced && !confirm('Move ' + (titles[displaced] || displaced) + ' to Holding and place ' + record.title + ' in panel ' + (slot + 1) + '?')) return;
+      post('showHeld', { session: name, slot });
+    });
+    restore.append(panelSelect, add);
+    item.append(fields, actions, restore);
     holding.appendChild(item);
   }
 }
@@ -7208,12 +7723,9 @@ function browserNewSession(kind = '') {
   const normalizedKind = ['claude', 'codex', 'shell'].includes(pickedKind) ? pickedKind : 'codex';
   const cwd = prompt('Project directory', JARGAN_ROOT);
   if (!cwd) return;
-  const base = basenameForBrowserPath(cwd);
-  const defaultSession = normalizedKind === 'codex' ? 'codex-' + kebabForBrowser(base) : kebabForBrowser(base);
-  const session = prompt('Tmux session name', defaultSession);
-  if (!session) return;
-  const title = prompt('Display name', session);
-  if (title === null) return;
+  const title = prompt('Session name (the work it owns)', '');
+  if (!title || !title.trim()) return;
+  const session = kebabForBrowser(title);
   const defaultCommand = normalizedKind === 'claude'
     ? 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide'
     : normalizedKind === 'codex'
@@ -7224,7 +7736,7 @@ function browserNewSession(kind = '') {
   const initialPrompt = prompt('Initial prompt (optional)', '');
   if (initialPrompt === null) return;
   const placement = browserPlacementValue(prompt('Place in: first, selected, holding, or slot number', 'first'));
-  post('newSession', { slot: selectedSlot, kind: normalizedKind, cwd, session, title, command, initialPrompt, placement });
+  post('newSession', { slot: selectedSlot, kind: normalizedKind, cwd, session: '', title, command, initialPrompt, placement });
 }
 async function browserOpenBoard(create = false) {
   if (!window.terminalTownBrowserHost) {
@@ -7385,18 +7897,27 @@ function closeBoardPicker(restore = true) {
 function saveBoardDrafts() {
   const prompts = {};
   for (const [slot, tile] of tiles) if (slotSessions[slot]) prompts[slotSessions[slot]] = tile.querySelector('.prompt-input').value;
-  try { sessionStorage.setItem('terminaltown-drafts-' + currentBoardId(), JSON.stringify({ prompts, meta: metaGoal.value })); } catch {}
+  const images = Object.fromEntries([...imageDrafts].filter(([key]) => key.startsWith(currentBoardId() + ':')).map(([key, entries]) => [key, entries.filter(entry => entry.path)]));
+  try { sessionStorage.setItem('terminaltown-drafts-' + currentBoardId(), JSON.stringify({ prompts, meta: metaGoal.value, images })); } catch {}
 }
 function restoreBoardDrafts() {
   try {
     const saved = JSON.parse(sessionStorage.getItem('terminaltown-drafts-' + currentBoardId()) || '{}');
     for (const [slot, tile] of tiles) if (!tile.querySelector('.prompt-input').value && saved.prompts && saved.prompts[slotSessions[slot]]) tile.querySelector('.prompt-input').value = saved.prompts[slotSessions[slot]];
     if (saved.meta && !metaGoal.value) metaGoal.value = saved.meta;
+    for (const [key, entries] of Object.entries(saved.images || {})) if (!imageDrafts.has(key) && key.startsWith(currentBoardId() + ':') && Array.isArray(entries)) imageDrafts.set(key, entries);
+    renderAllImageDrafts();
     document.querySelectorAll('.prompt-input').forEach(resizePromptInput);
   } catch {}
 }
 window.addEventListener('pagehide', saveBoardDrafts);
 function openBoardFromPicker(entry) {
+  if (entry?.page) {
+    saveBoardDrafts(); closeBoardPicker(false);
+    if (window.terminalTownBrowserHost) window.location.assign(larsonRemotePageUrl());
+    else post('openExternal', {url:larsonRemotePageUrl()});
+    return;
+  }
   const id = String(entry && (entry.id || entry.boardId) || '').trim();
   if (!id) return;
   saveBoardDrafts(); closeBoardPicker(false);
@@ -7425,7 +7946,7 @@ function renderBoardPicker() {
   const focusedPin = document.activeElement && document.activeElement.dataset.pin;
   const query = boardPickerInput.value.trim().toLocaleLowerCase();
   const score = b => pinnedBoards.includes(b.id) ? -200 + pinnedBoards.indexOf(b.id) : b.id === currentBoardId() ? -100 : recentBoards.includes(b.id) ? recentBoards.indexOf(b.id) : 100;
-  const list = boardDirectory.filter(b => (b.title + ' ' + b.id).toLocaleLowerCase().includes(query)).sort((a, b) => score(a) - score(b) || a.title.localeCompare(b.title));
+  const list = boardDirectory.concat([{id:'larson-remote',title:'Larson Remote',page:true}]).filter(b => (b.title + ' ' + b.id).toLocaleLowerCase().includes(query)).sort((a, b) => score(a) - score(b) || a.title.localeCompare(b.title));
   boardPickerList.replaceChildren();
   for (const entry of list) {
     const row = document.createElement('div'); row.className = 'board-picker-row';
@@ -7436,7 +7957,7 @@ function renderBoardPicker() {
     if (active) item.setAttribute('aria-current', 'page');
     const title = document.createElement('span'); title.className = 'board-picker-title'; title.textContent = entry.title || entry.id;
     const detail = document.createElement('span'); detail.className = 'board-picker-id';
-    detail.textContent = active ? 'Current' : pinnedBoards.includes(entry.id) ? 'Starred' : recentBoards.includes(entry.id) ? 'Recent' : entry.id;
+    detail.textContent = entry.page ? 'Page' : active ? 'Current' : pinnedBoards.includes(entry.id) ? 'Starred' : recentBoards.includes(entry.id) ? 'Recent' : entry.id;
     item.append(title, detail); item.addEventListener('click', () => openBoardFromPicker(entry));
     const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'pin-board'; pin.dataset.pin = entry.id;
     const pinned = pinnedBoards.includes(entry.id); pin.textContent = pinned ? '★' : '☆';
@@ -7446,7 +7967,7 @@ function renderBoardPicker() {
       pinnedBoards = pinned ? pinnedBoards.filter(id => id !== entry.id) : [...pinnedBoards, entry.id];
       preferenceStorage.setItem('terminaltown-pinned-boards', JSON.stringify(pinnedBoards)); renderBoardPins(); renderBoardPicker();
     });
-    row.append(item, pin); boardPickerList.append(row);
+    row.append(item); if (!entry.page) row.append(pin); boardPickerList.append(row);
   }
   if (!list.length) {
     const empty = document.createElement('p'); empty.textContent = 'No matching boards.'; boardPickerList.append(empty);
@@ -7502,6 +8023,7 @@ boardPicker.addEventListener('keydown', ev => {
 });
 window.addEventListener('keydown', ev => {
   if (boardShortcut === 'off' || ev.metaKey || ev.isComposing) return;
+  if (ev.code === 'KeyV' && editableTarget(ev.target)) return;
   if (ev.ctrlKey && !ev.altKey && (ev.code === 'KeyB' || (ev.code === 'KeyV' && !ev.shiftKey))) {
     ev.preventDefault(); ev.stopImmediatePropagation();
     if (!ev.repeat) cycleBoard(ev.code === 'KeyV' ? -1 : 1);
@@ -7515,10 +8037,6 @@ window.addEventListener('keydown', ev => {
 }, true);
 
 function browserOpenMap() {
-  if (window.terminalTownBrowserHost) {
-    window.open('/map', '_blank', 'noopener,noreferrer');
-    return;
-  }
   post('openMap');
 }
 function browserConfirmBye(slot) {
@@ -7709,6 +8227,9 @@ newBoardButton.addEventListener('click', () => browserOpenBoard(true));
 openBoardButton.addEventListener('click', showBoardPicker);
 renameBoardButton.addEventListener('click', browserRenameBoard);
 openMapButton.addEventListener('click', browserOpenMap);
+document.getElementById('openEnvironments').addEventListener('click', () => {
+  post('openEnvironments');
+});
 if (boardPickerClose) boardPickerClose.addEventListener('click', closeBoardPicker);
 if (boardPicker) {
   boardPicker.addEventListener('click', (ev) => {
@@ -7802,19 +8323,40 @@ document.addEventListener('copy', (ev) => {
   note('Copied slot ' + (selectedSlot + 1));
 });
 if (clipboardProxy) {
-  clipboardProxy.addEventListener('input', () => {
+  const recoverProxyInput = (ev) => {
+    if (ev.isComposing || !clipboardProxy.value) return;
+    const prompt = tiles.get(selectedSlot)?.querySelector('.prompt-input');
+    if (!prompt) return;
+    const text = clipboardProxy.value;
     clipboardProxy.value = '';
-  });
+    prompt.setRangeText(text, prompt.selectionStart, prompt.selectionEnd, 'end');
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    prompt.focus({ preventScroll: true });
+  };
+  // Recover direct accessibility/IME insertion if an old focus reference still
+  // targets the proxy. Never submit dictated text as a terminal command.
+  clipboardProxy.addEventListener('input', recoverProxyInput);
+  clipboardProxy.addEventListener('compositionend', recoverProxyInput);
 }
 document.addEventListener('paste', async (ev) => {
+  if (ev.defaultPrevented) return;
   if (slotSessions[selectedSlot] === LARSON_DESKTOP_SESSION && !editableTarget(ev.target)) return;
   if (ev.target.closest && ev.target.closest('.toolbar,.head,.board-picker,.panel-menu,.mobile-ui')) return;
   pasteEventSerial += 1;
+  const hasImages = Array.from(ev.clipboardData?.items || []).some(item => item.type.startsWith('image/'));
+  const tile = ev.target.closest && ev.target.closest('.tile');
+  const pasteSlot = tile?.dataset.slot !== undefined ? Number(tile.dataset.slot) : selectedSlot;
+  const pasteSession = slotSessions[pasteSlot];
+  if (hasImages) {
+    ev.preventDefault();
+    if (tile?.classList.contains('meta-panel-surface')) { note('Paste images into a panel prompt.'); return; }
+  }
   try {
     const images = await clipboardImagesFromItems(ev.clipboardData && ev.clipboardData.items);
     if (images.length) {
       ev.preventDefault();
-      await pasteImagesToSlot(selectedSlot, images);
+      if (slotSessions[pasteSlot] !== pasteSession) { note('The panel changed; paste the images again.'); return; }
+      await pasteImagesToSlot(pasteSlot, images);
       return;
     }
     if (editableTarget(ev.target)) return;
@@ -7903,6 +8445,8 @@ window.addEventListener('keydown', (ev) => {
 window.addEventListener('message', (event) => {
   const msg = event.data || {};
   if (msg.type === 'moveResult') { finishPanelMove(msg); return; }
+  if (msg.type === 'sessionDirectoryResult') { sessionFinderRecords = msg.records || []; renderSessionFinder(); return; }
+  if (msg.type === 'sessionFocus') { pendingSessionFocus=msg.session || ''; applySessionFocus(); return; }
   if (msg.type === 'data') {
     if (spectacleActive()) {
       pendingData = msg.data || {};
@@ -7925,25 +8469,29 @@ window.addEventListener('message', (event) => {
     note(msg.message);
   }
   if (msg.type === 'note') note(msg.message || '');
+  if (msg.type === 'imageDraftResult') finishImageStage(msg);
+  if (msg.type === 'clipboardImageDraft') acceptClipboardImageDraft(msg).catch(error => note(error.message));
+  if (msg.type === 'promptResult') finishImageSend(msg);
   if (msg.type === 'metaResult') {
     const hasCommand = msg.command !== undefined;
-    const agentRunning = /^(?:codex|claude)(?:\\s|$)/i.test(String(msg.command || ''));
+    const agentRunning = msg.agentRunning === true || /^(?:codex|claude)(?:\\s|$)/i.test(String(msg.command || ''));
     const stopped = hasCommand && !agentRunning;
-    updateMetaTranscript(stopped && !msg.output ? 'Saved Meta session is not running.' : msg.output);
+    const dormant = msg.dormant === true;
+    updateMetaTranscript(stopped && !msg.output ? 'Saved Meta session is not running.' : msg.output, msg.cwd || '');
     if (Object.prototype.hasOwnProperty.call(msg, 'memory')) {
       metaMemoryRecord = { name: msg.session, display: 'Meta Terminal', memory: msg.memory };
       metaTerminal.querySelector('.meta-panel-surface').classList.toggle('has-memory', Boolean(msg.memory?.approvedCharter));
       if (sessionMemoryDialog.open && memoryDialogSlot === 'meta') populateMemoryDialog();
     }
     const metaMemoryVisible = metaTerminal.querySelector('.meta-panel-surface').classList.contains('has-memory');
-    document.getElementById('metaMemory').textContent = stopped && metaMemoryVisible ? 'Memory · stopped' : 'Memory saved';
+    document.getElementById('metaMemory').textContent = dormant ? 'Memory saved' : stopped && metaMemoryVisible ? 'Memory · stopped' : 'Memory saved';
     if (msg.clearInput && msg.ok && pendingMetaDraft !== null) {
       if (metaGoal.value === pendingMetaDraft) { metaGoal.value = ''; resizePromptInput(metaGoal); }
       pendingMetaDraft = null;
     }
-    metaLaunchButton.disabled = pendingMetaDraft !== null || stopped;
+    metaLaunchButton.disabled = pendingMetaDraft !== null || (stopped && !dormant);
     for (const control of [metaEscButton, metaPasteButton, metaTabButton, metaEnterButton, metaCtrlCButton]) control.disabled = stopped;
-    metaStatus.textContent = pendingMetaDraft !== null ? 'Sending…' : (stopped ? (metaMemoryVisible ? '' : 'Stopped · ') + (msg.command || 'missing') : metaSendError || (msg.command !== undefined
+    metaStatus.textContent = pendingMetaDraft !== null ? 'Sending…' : metaSendError || (dormant ? 'Ready' : stopped ? (metaMemoryVisible ? '' : 'Stopped · ') + (msg.command || 'missing') : (msg.command !== undefined
       ? (agentRunning ? 'Connected' : 'Stopped · ' + (msg.command || 'missing'))
       : (msg.session ? 'Connected' : '')));
   }
@@ -7971,6 +8519,7 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) requestRefresh({ force: true });
 });
 ${fs.readFileSync(path.join(__dirname, 'mobile.js'), 'utf8')}
+${fs.readFileSync(path.join(__dirname, 'sessionFinder.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'panelHealth.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'panelHealthClient.js'), 'utf8')}
 let preferencesApplied = false;
@@ -8333,6 +8882,15 @@ function registerAiGridLegacy(context, vscode, log = () => {}, options = {}) {
       if (handlePreferenceMessage(msg, panel.webview)) return;
       if (await handlePanelHealthMessage(msg, panel.webview, {})) return;
       try {
+        if (msg.type === 'placeHeld') {
+          await assignHeldBoard(String(msg.session || ''), String(msg.destinationBoardId || ''));
+          await refresh();
+          return;
+        }
+        if (msg.type === 'sessionDirectory') {
+          panel.webview.postMessage({ type: 'sessionDirectoryResult', records: await sessionDirectory() });
+          return;
+        }
         if (msg.type === 'focusSlot') {
           const slot = Number(msg.slot);
           if (Number.isInteger(slot)) focusedSlot = slot;
@@ -8453,7 +9011,9 @@ function registerAiGridLegacy(context, vscode, log = () => {}, options = {}) {
           const data = await collect();
           const session = data.sessions[Number(msg.slot)] && data.sessions[Number(msg.slot)].name;
           const submitKey = String(msg.submitKey || 'enter');
-          await sendPrompt(session, String(msg.prompt || ''), submitKey);
+          const result = await sendPanelPrompt(session, msg);
+          panel.webview.postMessage(result);
+          if (!result.ok) return;
           panel.webview.postMessage({ type: 'note', message: `${submitKey === 'tab' ? 'Queued' : 'Sent'} to ${session}` });
           await refresh();
         }
@@ -8495,6 +9055,11 @@ function registerAiGridLegacy(context, vscode, log = () => {}, options = {}) {
           const files = await pasteImages(session, msg.images);
           panel.webview.postMessage({ type: 'note', message: `Pasted ${files.length} image path${files.length === 1 ? '' : 's'} to ${session}` });
           await refresh();
+        }
+        if (msg.type === 'stageImages') {
+          const data = await collect();
+          const session = data.sessions[Number(msg.slot)]?.name;
+          panel.webview.postMessage(await stageImageDraft(session, msg));
         }
         if (msg.type === 'rename') {
           const data = await collect();
@@ -8870,6 +9435,22 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
       if (await handlePanelHealthMessage(msg, controller.panel.webview, controller.board)) return;
       if (msg.type === 'rendered') { controller.delivery.acknowledge(msg); return; }
       try {
+        if (msg.type === 'placeHeld') {
+          await assignHeldBoard(String(msg.session || ''), String(msg.destinationBoardId || ''));
+          await refreshController(controller, {force:true});
+          return;
+        }
+        if (msg.type === 'sessionDirectory') {
+          controller.panel.webview.postMessage({ type: 'sessionDirectoryResult', records: await sessionDirectory() });
+          return;
+        }
+        if (msg.type === 'findSession') {
+          const destination = await openBoardPanel({boardId:msg.boardId});
+          await destination.readyPromise;
+          destination.panel.webview.postMessage({type:'sessionFocus', session:msg.session});
+          await refreshController(destination, {force:true});
+          return;
+        }
         if (msg.type === 'focusSlot') {
           const slot = Number(msg.slot);
           if (Number.isInteger(slot)) controller.focusedSlot = slot;
@@ -8916,6 +9497,10 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
           controller.panel.title = renamed.title;
           controller.panel.webview.postMessage({ type: 'note', message: `Renamed board to ${renamed.title}` });
           await refreshController(controller, { force: true });
+          return;
+        }
+        if (msg.type === 'openEnvironments') {
+          vscode.window.showInformationMessage('Environment dashboards are configured by the host application.');
           return;
         }
         if (msg.type === 'openMap') {
@@ -9017,7 +9602,9 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
           const data = await collect(controller.board);
           const session = data.sessions[Number(msg.slot)] && data.sessions[Number(msg.slot)].name;
           const submitKey = String(msg.submitKey || 'enter');
-          await sendPrompt(session, String(msg.prompt || ''), submitKey);
+          const result = await sendPanelPrompt(session, msg);
+          controller.panel.webview.postMessage(result);
+          if (!result.ok) return;
           controller.panel.webview.postMessage({ type: 'note', message: `${submitKey === 'tab' ? 'Queued' : 'Sent'} to ${session}` });
           await refreshController(controller, { force: true });
           return;
@@ -9064,6 +9651,12 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
           const files = await pasteImages(session, msg.images);
           controller.panel.webview.postMessage({ type: 'note', message: `Pasted ${files.length} image path${files.length === 1 ? '' : 's'} to ${session}` });
           await refreshController(controller, { force: true });
+          return;
+        }
+        if (msg.type === 'stageImages') {
+          const data = await collect(controller.board);
+          const session = data.sessions[Number(msg.slot)]?.name;
+          controller.panel.webview.postMessage(await stageImageDraft(session, msg));
           return;
         }
         if (msg.type === 'rename') {
@@ -9167,12 +9760,8 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
         await refreshController(controller, { focusedSlot: picked.slot, force: true });
         return;
       }
-      const files = await pasteSystemClipboardImage(picked.session.name);
-      if (files.length) {
-        controller.panel.webview.postMessage({ type: 'note', message: `Pasted ${files.length} image path${files.length === 1 ? '' : 's'} to ${picked.session.name}` });
-        await refreshController(controller, { focusedSlot: picked.slot, force: true });
-        return;
-      }
+      // Without a connected panel there is no draft UI in which to remove an
+      // attachment. Never push an image directly into its native composer.
       await controller.panel.webview.postMessage({ type: 'pasteRequest', slot: picked.slot });
     } catch (e) {
       vscode.window.showErrorMessage(`TerminalTown paste failed: ${e.message}`);
@@ -9317,6 +9906,8 @@ function registerAiGrid(context, vscode, log = () => {}, options = {}) {
 }
 
 module.exports = {
+  isRunningAgent,
+  sessionDirectory,
   createPanelDelivery,
   registerAiGrid,
   html,
@@ -9329,19 +9920,24 @@ module.exports = {
   resetCellSizes,
   setGridShape,
   displayPaneOutput,
+  compactMetaTranscript: compactCodexTranscript,
   recoverMissingSessions,
   renameSessionLabel,
   renameBoardTitle,
   sendPrompt,
+  sendPanelPrompt,
+  stageImageDraft,
   sendKey,
   createTerminalKeyDispatcher,
   answerCodexQuestion,
   pasteText,
   pasteImages,
   pasteSystemClipboardImage,
+  systemClipboardImageDraft,
   openFullTerminal,
   byeSession,
   holdSession,
+  assignHeldBoard,
   renameTmuxSession,
   moveSessionToBoard,
   createAiSession,
@@ -9352,5 +9948,7 @@ module.exports = {
   queueMemoryHydration,
   updateSessionMemory,
   readManifest,
+  isDormantAgent,
+  readyPanelText,
   readDiscoSettings,
 };

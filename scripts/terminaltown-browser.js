@@ -23,11 +23,13 @@ const {
   openFullTerminal,
   byeSession,
   createAiSession,
+  sessionDirectory,
   readDiscoSettings,
 } = require(process.env.TERMINALTOWN_LIVE === '1' ? '../src/aiGrid' : '../src/demo');
 
 const ROOT = path.resolve(__dirname, '..');
 const ASSETS_DIR = path.join(ROOT, 'assets');
+const PUBLIC_UI_BUILD = require('../src/panelHealth').frontendIdentity(path.join(ROOT, 'src'));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.TERMINALTOWN_BROWSER_PORT || process.env.PORT || 17896);
 const DEFAULT_BOARD = {
@@ -37,6 +39,29 @@ const DEFAULT_BOARD = {
 const CODEX_DEFAULT_COMMAND = 'codex';
 const DATA_DIR = path.join(process.env.HOME || '', '.local', 'share', 'terminaltown-public');
 const BOARDS_DIR = path.join(DATA_DIR, 'boards');
+const healthReports = new Map();
+
+function healthSnapshot() {
+  const reports = [...healthReports.values()];
+  const incidents = reports.flatMap((report) => Array.isArray(report.incidents) ? report.incidents : []);
+  return {
+    buildId: PUBLIC_UI_BUILD,
+    uiBuild: PUBLIC_UI_BUILD,
+    incidents,
+    observers: reports.map((report) => ({
+      id: report.observer,
+      board: report.board,
+      lastSeen: report.at,
+      detectors: report.detectors || [],
+    })),
+    boards: [...new Set(reports.map((report) => String(report.board || 'default')))].map((board) => ({
+      board,
+      covered: true,
+    })),
+    monitor: { state: 'running', sourceDrift: false },
+    storage: { state: 'memory' },
+  };
+}
 
 function sendJson(res, status, value) {
   const body = JSON.stringify(value);
@@ -238,6 +263,7 @@ async function handleMessage(message) {
   const board = boardForRequest(msg);
   const note = (messageText) => ({ type: 'note', message: messageText });
 
+  if (msg.type === 'sessionDirectory') return [{ type: 'sessionDirectoryResult', records: await sessionDirectory(String(msg.query || '')) }];
   if (msg.type === 'focusSlot') return [];
   if (msg.type === 'refresh') return refreshMessagesFor(msg, board);
   if (msg.type === 'spectacle') return [];
@@ -426,6 +452,36 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/boards') {
       const board = boardForRequest({ boardId: url.searchParams.get('board') || '' });
       sendJson(res, 200, { active: { id: board.boardId, title: board.boardTitle }, boards: knownBoards() });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/health') {
+      sendJson(res, 200, healthSnapshot());
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/health') {
+      const report = JSON.parse(await readBody(req) || '{}');
+      if (!report || typeof report !== 'object' || !String(report.observer || '').trim()) {
+        sendJson(res, 400, { error: 'observer required' });
+        return;
+      }
+      healthReports.set(String(report.observer), {
+        observer: String(report.observer),
+        board: String(report.board || 'default'),
+        at: Number(report.at) || Date.now(),
+        detectors: Array.isArray(report.detectors) ? report.detectors.slice(-256) : [],
+        incidents: Array.isArray(report.incidents) ? report.incidents.slice(-200) : [],
+      });
+      sendJson(res, 200, healthSnapshot());
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/terminal-files/resolve') {
+      const request = JSON.parse(await readBody(req) || '{}');
+      const references = Array.isArray(request.references) ? request.references : [];
+      sendJson(res, 200, { files: references.map(() => ({ available: false, reason: 'Artifact access is disabled in the standalone public edition.' })) });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/terminal-file') {
+      sendText(res, 404, 'Artifact access is disabled in the standalone public edition.');
       return;
     }
     sendText(res, 404, 'not found');

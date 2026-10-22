@@ -3,6 +3,12 @@ const LARSON_DESKTOP_SESSION = 'remote:larson-desktop';
 const LARSON_DESKTOP_URL = typeof window !== 'undefined' && window.terminalTownDesktopUrl
   ? String(window.terminalTownDesktopUrl)
   : '';
+function larsonRemotePageUrl() {
+  const base = typeof window !== 'undefined' && window.terminalTownDesktopPageUrl
+    ? String(window.terminalTownDesktopPageUrl)
+    : '';
+  return base ? base + (base.includes('?') ? '&' : '?') + 'returnBoard=' + encodeURIComponent(currentBoardId()) : '';
+}
 
 function preserveDesktopPlacement(data) {
   const destination = (data.sessions || []).findIndex(session => session.name === LARSON_DESKTOP_SESSION);
@@ -44,9 +50,9 @@ function setupLarsonDesktop(el) {
   const menu = document.createElement('div');
   menu.className = 'desktop-controls';
   menu.innerHTML = '<button type="button" class="desktop-reconnect">Reconnect</button><a class="desktop-open" target="_blank" rel="noopener noreferrer">Open desktop ↗</a>';
-  menu.querySelector('a').href = LARSON_DESKTOP_URL;
+  menu.querySelector('a').href = larsonRemotePageUrl();
   menu.querySelector('a').addEventListener('click', ev => {
-    if (!window.terminalTownBrowserHost) { ev.preventDefault(); post('openExternal', { url: LARSON_DESKTOP_URL }); }
+    if (!window.terminalTownBrowserHost) { ev.preventDefault(); post('openExternal', { url: menu.querySelector('a').href }); }
   });
   el.querySelector('.panel-menu').appendChild(menu);
   fullscreen.addEventListener('click', async () => {
@@ -79,6 +85,7 @@ function syncLarsonDesktop(el, session, boardId) {
   const remote = session.name === LARSON_DESKTOP_SESSION;
   if (!LARSON_DESKTOP_URL) {
     el.classList.remove('larson-desktop');
+    el.querySelector('.desktop-frame')?.remove();
     return;
   }
   el.classList.toggle('larson-desktop', remote);
@@ -90,6 +97,7 @@ function syncLarsonDesktop(el, session, boardId) {
     if (document.fullscreenElement === el) document.exitFullscreen().catch(() => {});
     return;
   }
+  el.querySelector('.desktop-open').href = larsonRemotePageUrl();
   el.querySelector('.meta').textContent = '';
   el.querySelector('.name').title = 'Larson Desktop';
   if (!frame) {

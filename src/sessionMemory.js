@@ -1,3 +1,4 @@
+const { resolveSessionName } = require('./sessionDirectory');
 const fs = require('fs');
 const path = require('path');
 
@@ -248,7 +249,7 @@ function reconcileConversation(memory, observed, options = {}) {
 }
 
 function updateSessionMemoryFile({ manifestFile, session, expectedRevision, operation, now }) {
-  const name = String(session || '').trim();
+  let name = String(session || '').trim();
   if (!name) throw new Error('Session name is required');
   const lockFile = `${manifestFile}.memory.lock`;
   let lock;
@@ -256,6 +257,7 @@ function updateSessionMemoryFile({ manifestFile, session, expectedRevision, oper
   try {
     lock = fs.openSync(lockFile, 'wx', 0o600);
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    name = resolveSessionName(name, manifest);
     const record = manifest.sessions && manifest.sessions[name];
     if (!record) throw new Error(`Session ${name} is not present in the manifest`);
     const current = normalizeSessionMemory(record.memory);

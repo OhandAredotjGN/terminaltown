@@ -20,6 +20,9 @@ agent defaults are supplied only through explicit environment configuration.
 
 - Resizable session grid and multiple boards.
 - Session labels, prompt input, key controls, and Holding.
+- Session Finder across placed and held work, with purpose and board context.
+- Panel-health observation in the browser, including a clear standalone-demo status.
+- Safer rendering for wrapped URLs, local artifact references, and long agent transcripts.
 - Persistent layouts and session recovery in live mode.
 - Visual themes and reduced-motion controls.
 - Default simulation with fictional sessions and no host clipboard or process access.
@@ -47,11 +50,13 @@ Live mode controls real local sessions, including sending commands and ending se
 
 ## How it works
 
-`src/aiGrid.js` contains the shared board renderer and optional tmux integration. `src/demo.js` replaces host operations with an in-memory simulation. `scripts/terminaltown-browser.js` serves the board with host/origin checks and JSON-only control requests.
+`src/aiGrid.js` contains the shared board renderer and optional tmux integration. The renderer is split into small browser helpers for preferences, panel health, session search, artifact-reference handling, and responsive controls. `src/demo.js` replaces host operations with an in-memory simulation. `scripts/terminaltown-browser.js` serves the board with host/origin checks, JSON-only control requests, demo session search, and in-memory health reporting.
 
 ## Scope and limitations
 
-This first public edition is browser-based. The desktop/VS Code integrations and project-specific maps are not included. The simulation was tested independently; agent-specific recovery is experimental and depends on installed CLI versions. Automatic agent restarts are off unless `TERMINALTOWN_AUTO_RECOVER=1` is explicitly set. Do not expose this control server directly to the internet.
+This first public edition is browser-based. Desktop/VS Code integrations, private project maps, external-terminal handoff, and artifact bytes remain host-specific and are not enabled by default. The simulation was tested independently; agent-specific recovery is experimental and depends on installed CLI versions. Automatic agent restarts are off unless `TERMINALTOWN_AUTO_RECOVER=1` is explicitly set. Do not expose this control server directly to the internet.
+
+Public syncs are prepared on a reviewable branch from the local renderer. The public server is intentionally a separate adapter: it keeps the renderer improvements while preventing private host paths, dashboards, credentials, and runtime evidence from becoming repository dependencies.
 
 ## About the work
 

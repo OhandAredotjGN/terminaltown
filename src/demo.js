@@ -86,6 +86,24 @@ async function collect(o = {}) {
       "DEMO — fictional sessions. Prompts and controls never reach your terminal.",
   };
 }
+async function sessionDirectory(query = '') {
+  const boardEntries = [...boards.values()];
+  const normalized = String(query || '').trim().toLowerCase();
+  return [...sessions].map(([name, session]) => {
+    const locations = boardEntries.flatMap((b) => (b.slots || []).flatMap((item, slot) =>
+      item === name ? [{ boardId: b.id, boardTitle: b.title, panel: slot + 1 }] : []));
+    return {
+      name,
+      title: session.title || name,
+      aliases: [],
+      charter: '',
+      cwd: 'demo-project',
+      kind: session.command || 'demo',
+      live: false,
+      locations,
+    };
+  }).filter((record) => !normalized || [record.name, record.title, record.cwd].join(' ').toLowerCase().includes(normalized));
+}
 function checkedSlot(b, s) {
   if (!Number.isInteger(s) || s < 0 || s >= b.slots.length)
     throw Error("Invalid slot");
@@ -185,6 +203,7 @@ module.exports = {
   sendKey: (name, key) => sendPrompt(name, "[" + key + "]"),
   byeSession,
   createAiSession,
+  sessionDirectory,
   recoverMissingSessions: async () => ({
     indexed: sessions.size,
     adopted: 0,
