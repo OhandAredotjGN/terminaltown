@@ -1,0 +1,16 @@
+.desktop-frame, .desktop-fullscreen, .desktop-controls { display: none; }
+.tile.larson-desktop { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--tile-head-height, 28px) minmax(0, 1fr); }
+.larson-desktop > pre, .larson-desktop > form,
+.larson-desktop .head-actions > .esc, .larson-desktop .head-actions > .paste,
+.larson-desktop .font-select { display: none; }
+.larson-desktop .panel-menu > :not(.panel-menu-title):not(.assign-field):not(.desktop-controls):not(.mobile-arrange) { display: none; }
+.larson-desktop .desktop-frame { display: block; grid-row: 2; align-self: start; width: 100%; height: 100%; min-height: 0; border: 0; background: #222; transform-origin: top left; }
+.board .larson-desktop .head-actions > .desktop-fullscreen { display: inline-block; }
+.larson-desktop .desktop-controls { display: grid; gap: 4px; }
+.desktop-open { color: var(--skin-text); padding: 6px 8px; text-decoration: none; border-radius: 4px; }
+.desktop-open:hover, .desktop-open:focus-visible { background: var(--skin-input); outline: 1px solid var(--skin-border); }
+.tile.larson-desktop:fullscreen, .tile.larson-desktop.desktop-expanded {
+  display: grid !important; position: fixed; inset: 0; z-index: 1000;
+  width: 100%; height: 100%; margin: 0; border-radius: 0; background: var(--skin-tile);
+}
+.larson-desktop:fullscreen .resize-edge, .larson-desktop.desktop-expanded .resize-edge { display: none; }

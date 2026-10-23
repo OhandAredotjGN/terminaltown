@@ -10,12 +10,16 @@ const {
   collect,
   assignSlot,
   moveSlot,
+  movePanelResult,
   resizeSlot,
   resetSlots,
   setGridShape,
   recoverMissingSessions,
   renameSessionLabel,
   sendPrompt,
+  sendPanelPrompt,
+  stageImageDraft,
+  answerCodexQuestion,
   sendKey,
   pasteText,
   pasteImages,
@@ -23,11 +27,17 @@ const {
   openFullTerminal,
   byeSession,
   createAiSession,
+  ensureMetaTerminal,
+  collectMetaTerminal,
+  isRunningAgent,
+  updateSessionMemory,
+  sessionDirectory,
   readDiscoSettings,
 } = require(process.env.TERMINALTOWN_LIVE === '1' ? '../src/aiGrid' : '../src/demo');
 
 const ROOT = path.resolve(__dirname, '..');
 const ASSETS_DIR = path.join(ROOT, 'assets');
+const PUBLIC_UI_BUILD = require('../src/panelHealth').frontendIdentity(path.join(ROOT, 'src'));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.TERMINALTOWN_BROWSER_PORT || process.env.PORT || 17896);
 const DEFAULT_BOARD = {
@@ -35,8 +45,32 @@ const DEFAULT_BOARD = {
   boardTitle: process.env.TERMINALTOWN_BROWSER_BOARD_TITLE || 'TerminalTown',
 };
 const CODEX_DEFAULT_COMMAND = 'codex';
-const DATA_DIR = path.join(process.env.HOME || '', '.local', 'share', 'terminaltown-public');
+const DATA_DIR = process.env.TERMINALTOWN_DATA_DIR || path.join(require('os').homedir(), '.local', 'share', 'terminaltown-public');
 const BOARDS_DIR = path.join(DATA_DIR, 'boards');
+const preferenceStore = require('../src/preferenceStore').createPreferenceStore(process.env.TERMINALTOWN_LIVE === '1' ? path.join(DATA_DIR, 'preferences.json') : null);
+const healthReports = new Map();
+
+function healthSnapshot() {
+  const reports = [...healthReports.values()];
+  const incidents = reports.flatMap((report) => Array.isArray(report.incidents) ? report.incidents : []);
+  return {
+    buildId: PUBLIC_UI_BUILD,
+    uiBuild: PUBLIC_UI_BUILD,
+    incidents,
+    observers: reports.map((report) => ({
+      id: report.observer,
+      board: report.board,
+      lastSeen: report.at,
+      detectors: report.detectors || [],
+    })),
+    boards: [...new Set(reports.map((report) => String(report.board || 'default')))].map((board) => ({
+      board,
+      covered: true,
+    })),
+    monitor: { state: 'running', sourceDrift: false },
+    storage: { state: 'memory' },
+  };
+}
 
 function sendJson(res, status, value) {
   const body = JSON.stringify(value);
@@ -148,7 +182,7 @@ function browserHtml() {
     '/assets/disco-ball.svg',
     '',
     '/assets/refractions.svg',
-    readDiscoSettings({ globalStorageUri: { fsPath: path.join(process.env.HOME || '', '.local', 'share', 'terminaltown-public') } })
+    readDiscoSettings({ globalStorageUri: { fsPath: DATA_DIR } })
   ).replace(
     /<meta http-equiv="Content-Security-Policy" content="[^"]+">/,
     `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self';">`
@@ -172,13 +206,23 @@ function acquireVsCodeApi() {
           body: JSON.stringify(requestPayload)
         });
         const payload = await response.json();
-        for (const item of payload.messages || []) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const failure = messages.find(item => item?.ok === false);
+        const ok = response.ok && Array.isArray(payload?.messages) && payload.ok !== false && !payload.error && !failure;
+        const error = payload?.error || failure?.error || 'TerminalTown request failed';
+        for (const item of messages) {
+          // A failed memory save must not refresh the dialog before its pending
+          // flag is cleared by the caller, which would replace the user's draft.
+          if (!ok && ['data', 'metaResult'].includes(item?.type)) continue;
           window.dispatchEvent(new MessageEvent('message', { data: item }));
         }
+        if (!ok && !messages.some(item => item?.type === 'note')) window.dispatchEvent(new MessageEvent('message', { data: { type: 'note', message: error } }));
+        return ok ? { ok: true } : { ok: false, error };
       } catch (err) {
         window.dispatchEvent(new MessageEvent('message', {
           data: { type: 'note', message: err && err.message ? err.message : 'TerminalTown browser host unavailable' }
         }));
+        return { ok: false, error: err && err.message ? err.message : 'TerminalTown browser host unavailable' };
       }
     }
   };
@@ -237,7 +281,35 @@ async function handleMessage(message) {
   if (process.env.TERMINALTOWN_LIVE !== '1' && msg.type === 'pasteClipboardText') return [{type:'note',message:'Host clipboard access is disabled in demo mode.'}];
   const board = boardForRequest(msg);
   const note = (messageText) => ({ type: 'note', message: messageText });
+  const metaResult = (snapshot, extra = {}) => ({ type: 'metaResult', ...snapshot, session: snapshot.name, ok: true, ...extra });
 
+  if (['metaEnsure', 'metaPoll', 'metaPrompt', 'metaKey', 'metaPasteClipboard'].includes(msg.type)) {
+    const meta = await (['metaEnsure', 'metaPrompt'].includes(msg.type) ? ensureMetaTerminal(board) : collectMetaTerminal(board));
+    if (msg.type === 'metaPrompt') {
+      await sendPrompt(meta.name, String(msg.prompt || ''), String(msg.submitKey || 'enter'), { agentOnly: true });
+      return [metaResult(await collectMetaTerminal(board), { clearInput: true })];
+    }
+    if (msg.type === 'metaKey' || msg.type === 'metaPasteClipboard') {
+      if (!meta.agentRunning && !isRunningAgent(meta, meta.command)) throw new Error('Meta Terminal is not running; no input was sent.');
+      if (msg.type === 'metaKey') await sendKey(meta.name, msg.key);
+      else {
+        const text = process.env.TERMINALTOWN_LIVE === '1' ? await readSystemClipboardText() : '[Demo clipboard text]';
+        if (!text) return [metaResult(meta), note('Clipboard has no text.')];
+        await pasteText(meta.name, text);
+      }
+      return [metaResult(await collectMetaTerminal(board))];
+    }
+    return [metaResult(meta)];
+  }
+
+  if (['memoryUpdateContext', 'memoryUpdateCharter', 'memoryApproveCharter', 'memoryRejectCharter'].includes(msg.type)) {
+    const session = msg.meta ? (await collectMetaTerminal(board)).name : (await sessionForSlot(msg.slot, board)).session;
+    if (!session || msg.session !== session) throw new Error('The panel changed; reopen its session memory.');
+    await updateSessionMemory(session, msg.type, msg);
+    return msg.meta ? [metaResult(await collectMetaTerminal(board))] : refreshMessages(board);
+  }
+
+  if (msg.type === 'sessionDirectory') return [{ type: 'sessionDirectoryResult', records: await sessionDirectory(String(msg.query || '')) }];
   if (msg.type === 'focusSlot') return [];
   if (msg.type === 'refresh') return refreshMessagesFor(msg, board);
   if (msg.type === 'spectacle') return [];
@@ -312,6 +384,7 @@ async function handleMessage(message) {
   }
 
   if (msg.type === 'move') {
+    if (msg.moveId !== undefined) return [await movePanelResult(msg, board)];
     await moveSlot(Number.isInteger(msg.fromSlot) ? msg.fromSlot : null, Number(msg.toSlot), String(msg.session || ''), board);
     return refreshMessages(board);
   }
@@ -340,8 +413,21 @@ async function handleMessage(message) {
   if (msg.type === 'prompt') {
     const { session } = await sessionForSlot(msg.slot, board);
     const submitKey = String(msg.submitKey || 'enter');
-    await sendPrompt(session, String(msg.prompt || ''), submitKey);
-    return refreshMessages(board, [note(`${submitKey === 'tab' ? 'Queued' : 'Sent'} to ${session}`)]);
+    const result = await sendPanelPrompt(session, msg);
+    if (!result.ok) return [result];
+    return refreshMessages(board, [result, note(`${submitKey === 'tab' ? 'Queued' : 'Sent'} to ${session}`)]);
+  }
+
+  if (msg.type === 'answerCodexQuestion') {
+    const { session } = await sessionForSlot(msg.slot, board);
+    if (msg.session && msg.session !== session) throw new Error('The panel changed; answer its current question.');
+    await answerCodexQuestion(session, { callId: String(msg.callId || ''), answers: msg.answers });
+    return refreshMessages(board, [note(`Answered Codex question in ${session}`)]);
+  }
+
+  if (msg.type === 'stageImages') {
+    const { session } = await sessionForSlot(msg.slot, board);
+    return [await stageImageDraft(session, msg)];
   }
 
   if (msg.type === 'pasteText') {
@@ -368,7 +454,7 @@ async function handleMessage(message) {
     return refreshMessages(board, [note(`${msg.key === 'ctrl-c' ? 'Ctrl-C' : msg.key === 'enter' ? 'Enter' : msg.key === 'escape' ? 'Esc' : msg.key} sent to ${session}`)]);
   }
 
-  return [note(`Unsupported browser message: ${msg.type || 'unknown'}`)];
+  throw new Error(`Unsupported browser message: ${msg.type || 'unknown'}`);
 }
 
 function readBody(req) {
@@ -394,8 +480,14 @@ const server = http.createServer(async (req, res) => {
     const allowed = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
     if (!allowed.has(req.headers.host)) { sendText(res, 403, 'Local access only'); return; }
     if (req.headers.origin && !allowed.has(new URL(req.headers.origin).host)) { sendText(res, 403, 'Origin rejected'); return; }
-    if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) { sendText(res, 415, 'JSON required'); return; }
+    if (['POST', 'PATCH'].includes(req.method) && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) { sendText(res, 415, 'JSON required'); return; }
     const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+    if (url.pathname === '/api/preferences' && ['GET', 'PATCH'].includes(req.method)) {
+      const device = url.searchParams.get('device');
+      const request = req.method === 'GET' ? null : JSON.parse(await readBody(req) || '{}');
+      sendJson(res, 200, request ? preferenceStore.patch(device || request.device, request.operations, request.migrate === true) : preferenceStore.get(device));
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/') {
       sendText(res, 200, browserHtml(), 'text/html; charset=utf-8');
       return;
@@ -416,7 +508,7 @@ const server = http.createServer(async (req, res) => {
       const message = JSON.parse(body || '{}');
       if (!message.boardId && url.searchParams.get('board')) message.boardId = url.searchParams.get('board');
       const messages = await handleMessage(message);
-      sendJson(res, 200, { messages });
+      sendJson(res, 200, { ok: !messages.some(message => message.ok === false), messages });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -425,12 +517,44 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/boards') {
       const board = boardForRequest({ boardId: url.searchParams.get('board') || '' });
-      sendJson(res, 200, { active: { id: board.boardId, title: board.boardTitle }, boards: knownBoards() });
+      const boards = process.env.TERMINALTOWN_LIVE === '1' ? knownBoards() : (await collect(board)).holdingBoards;
+      sendJson(res, 200, { active: { id: board.boardId, title: board.boardTitle }, boards });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/health') {
+      sendJson(res, 200, healthSnapshot());
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/health') {
+      const report = JSON.parse(await readBody(req) || '{}');
+      if (!report || typeof report !== 'object' || !String(report.observer || '').trim()) {
+        sendJson(res, 400, { error: 'observer required' });
+        return;
+      }
+      healthReports.set(String(report.observer), {
+        observer: String(report.observer),
+        board: String(report.board || 'default'),
+        at: Number(report.at) || Date.now(),
+        detectors: Array.isArray(report.detectors) ? report.detectors.slice(-256) : [],
+        incidents: Array.isArray(report.incidents) ? report.incidents.slice(-200) : [],
+      });
+      sendJson(res, 200, healthSnapshot());
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/terminal-files/resolve') {
+      const request = JSON.parse(await readBody(req) || '{}');
+      const references = Array.isArray(request.references) ? request.references : [];
+      sendJson(res, 200, { files: references.map(() => ({ available: false, reason: 'Artifact access is disabled in the standalone public edition.' })) });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/terminal-file') {
+      sendText(res, 404, 'Artifact access is disabled in the standalone public edition.');
       return;
     }
     sendText(res, 404, 'not found');
   } catch (err) {
     sendJson(res, 500, {
+      ok: false,
       messages: [{ type: 'note', message: err && err.message ? err.message : String(err) }],
       error: err && err.message ? err.message : String(err),
     });

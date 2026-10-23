@@ -1,0 +1,38 @@
+<section id="mobileOverview" class="mobile-ui mobile-overview" aria-label="Board overview" hidden>
+  <div class="mobile-overview-heading"><strong>Whole board</strong><span id="mobileSummary" role="status"></span></div>
+  <p class="mobile-hint">Tap a panel to jump to it.</p>
+  <div id="mobileOverviewGrid" class="mobile-overview-grid"></div>
+</section>
+<div id="mobileShade" class="mobile-ui mobile-shade" hidden></div>
+<section id="mobileNavigate" class="mobile-ui mobile-sheet" role="dialog" aria-modal="true" aria-labelledby="mobileNavigateTitle" hidden>
+  <header><strong id="mobileNavigateTitle">Navigate</strong><button type="button" data-mobile-close aria-label="Close navigation">✕</button></header>
+  <div class="mobile-sheet-body">
+    <button type="button" id="mobileBoards" class="mobile-wide">▦ <span>Switch board</span><span id="mobileBoardName"></span> ›</button>
+    <button type="button" id="mobileFindSession" class="mobile-wide">⌕ <span>Find session</span> ›</button>
+    <button type="button" id="mobilePreviousBoard">↶ Previous board</button>
+    <div id="mobileQuickBoards" class="mobile-quick-boards" aria-label="Pinned and recent boards"></div>
+    <h2>Phone layout</h2>
+    <div class="mobile-segments" aria-label="Scrolling or tabs"><button type="button" id="mobileScrollMode">Scroll</button><button type="button" id="mobileTabsMode">Tabs</button></div>
+    <div id="mobileHeightField"><label class="mobile-setting" for="mobilePanelHeight">Height <output id="mobilePanelHeightValue" for="mobilePanelHeight">240 px</output></label><input id="mobilePanelHeight" type="range" min="160" max="600" step="20" value="240" aria-label="Panel height in pixels"><p class="mobile-hint">Continuous column. Empty slots stay compact.</p></div>
+    <label id="mobileCountField" class="mobile-setting" for="mobilePanelsPerTab" hidden>Panel grid<select id="mobilePanelsPerTab"><option value="1">1 panel</option><option value="2" selected>1 × 2 · Stacked</option><option value="3">3 panels</option><option value="4">4 panels</option><option value="6">6 panels</option></select></label>
+    <div class="mobile-step"><button type="button" id="mobilePrevPanel">← Previous</button><button type="button" id="mobileNextPanel">Next →</button><button type="button" id="mobileShowOverview">▦ Overview</button></div>
+    <div id="mobilePanelList" class="mobile-panel-list"></div>
+  </div>
+</section>
+<section id="mobileControls" class="mobile-ui mobile-sheet" role="dialog" aria-modal="true" aria-labelledby="mobileControlsTitle" hidden>
+  <header><strong id="mobileControlsTitle">Controls</strong><button type="button" data-mobile-close aria-label="Close controls">✕</button></header>
+  <div class="mobile-sheet-body">
+    <div class="mobile-segments mobile-control-shortcuts"><button type="button" id="mobileMeta"><span aria-hidden="true">▣</span><span id="mobileMetaLabel">Meta Terminal</span></button><button type="button" id="mobileHolding"><span aria-hidden="true">▤</span><span>Holding <b id="mobileHoldingCount">0</b></span></button><button type="button" id="mobileRefresh"><span aria-hidden="true">↻</span><span>Refresh</span></button></div>
+    <div id="mobileHealthHost"></div>
+    <details open><summary>Appearance &amp; layout</summary><p class="mobile-hint">Grid changes the shared board. Navigate changes panels on this phone.</p><label class="mobile-setting" for="mobileDockShape">Bottom bar<select id="mobileDockShape"><option value="rounded">Rounded</option><option value="square">Square</option></select></label><div id="mobileViewHost"></div></details>
+    <details><summary>New session</summary><div id="mobileSessionHost"></div></details>
+    <details><summary>Maintenance &amp; help</summary><div id="mobileToolsHost"></div></details>
+  </div>
+</section>
+<div id="mobileDockShell" class="mobile-ui mobile-dock-shell" aria-hidden="true"></div>
+<nav id="mobileDock" class="mobile-ui mobile-dock" aria-label="Mobile control centers" data-mobile-build="TT-MOBILE-TABS-20260910">
+  <button type="button" id="mobileNavigateButton" aria-controls="mobileNavigate" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>Navigate</span></button>
+  <button type="button" id="mobileOverviewButton" aria-pressed="false" title="Overview of the whole board"><span id="mobileAttention">▦</span><span>Overview</span></button>
+  <div id="mobilePager" class="mobile-pager" role="group" aria-label="Panel tabs" hidden><button type="button" id="mobilePrevTab" aria-label="Previous panel tab" title="Previous tab">←</button><button type="button" id="mobileTabPosition" title="Open overview" aria-label="Open board overview"></button><button type="button" id="mobileNextTab" aria-label="Next panel tab" title="Next tab">→</button></div>
+  <button type="button" id="mobileControlsButton" aria-controls="mobileControls" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>Controls</span></button>
+</nav>
