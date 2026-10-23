@@ -18,8 +18,8 @@ function textFilesUnder(directory) {
   return result;
 }
 
-test('public renderer has current bounded UI without private host markers', () => {
-  const { html } = require('../src/aiGrid');
+test('public renderer has current bounded UI without private host markers', (t) => {
+  const { html } = require('./helpers/ai-grid-vm')(t).api;
   const rendered = html({ cspSource: "'self'" }, '/assets/disco-ball.svg', '', '/assets/refractions.svg', {});
   assert.match(rendered, /Find session/);
   assert.match(rendered, /Panel health/);

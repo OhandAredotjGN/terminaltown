@@ -16,8 +16,13 @@ function setupCodexQuestion(tile, slot) {
     for (const control of form.elements) control.disabled = true;
     const status = form.querySelector('.codex-question-status');
     status.textContent = 'Submitting…';
-    const result = await post('answerCodexQuestion', { slot: currentSlot, callId: interaction.callId, answers });
-    if (result && result.ok === false) {
+    let result;
+    try {
+      result = await post('answerCodexQuestion', { slot: currentSlot, callId: interaction.callId, answers });
+    } catch {
+      result = { ok: false };
+    }
+    if (result?.ok === false || (window.terminalTownBrowserHost && result?.ok !== true)) {
       form.setAttribute('aria-busy', 'false');
       for (const control of form.elements) control.disabled = false;
       status.textContent = 'Could not submit. Refresh and try again.';

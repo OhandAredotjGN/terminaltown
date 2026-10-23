@@ -1,6 +1,7 @@
 const { resolveSessionName } = require('./sessionDirectory');
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const MEMORY_VERSION = 1;
 const MAX_FIELD = 65536;
@@ -248,6 +249,82 @@ function reconcileConversation(memory, observed, options = {}) {
   return { action: 'hydrate', memory: current, conversation };
 }
 
+const ORPHAN_LOCK_MS = 5 * 60 * 1000;
+
+function processIsAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code !== 'ESRCH'; }
+}
+
+function releaseMemoryLock(lockFile, owner) {
+  // The unique marker prevents a delayed cleanup from removing a newer owner.
+  try { fs.unlinkSync(path.join(lockFile, owner)); } catch { return; }
+  try { fs.rmdirSync(lockFile); } catch {}
+}
+
+function recoverMemoryLock(lockFile) {
+  let stat;
+  try { stat = fs.lstatSync(lockFile); }
+  catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+  if (stat.isDirectory()) {
+    let entries;
+    try { entries = fs.readdirSync(lockFile); }
+    catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+    if (!entries.length) {
+      try { fs.rmdirSync(lockFile); } catch {}
+      return true;
+    }
+    const owner = entries.length === 1 && entries[0];
+    const match = owner && /^owner-([1-9]\d*)-/.exec(owner);
+    if (!match || processIsAlive(Number(match[1]))) return false;
+    releaseMemoryLock(lockFile, owner);
+    return true;
+  }
+  // Older releases left empty files. Give incomplete/invalid legacy locks a
+  // grace period, and never reclaim a recorded owner that is still alive.
+  if (!stat.isFile()) return false;
+  let pid;
+  try { pid = JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid; } catch {}
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    if (processIsAlive(pid)) return false;
+  } else if (Date.now() - stat.mtimeMs < ORPHAN_LOCK_MS) {
+    return false;
+  }
+  try {
+    const current = fs.lstatSync(lockFile);
+    if (current.dev !== stat.dev || current.ino !== stat.ino) return true;
+    // A concurrently acquired new lock is a directory, which unlink cannot
+    // remove even if it appeared after the identity check above.
+    fs.unlinkSync(lockFile);
+  } catch (error) {
+    if (!['ENOENT', 'EISDIR', 'EPERM'].includes(error.code)) throw error;
+  }
+  return true;
+}
+
+function acquireMemoryLock(lockFile) {
+  const candidate = fs.mkdtempSync(`${lockFile}.${process.pid}.`);
+  const owner = `owner-${process.pid}-${randomUUID()}`;
+  try {
+    fs.writeFileSync(path.join(candidate, owner), '', { mode: 0o600 });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // Publish a fully initialized directory atomically. A live owner's
+        // nonempty directory cannot be replaced by another writer's rename.
+        fs.renameSync(candidate, lockFile);
+        return owner;
+      } catch (error) {
+        if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EISDIR'].includes(error.code)) throw error;
+        if (!recoverMemoryLock(lockFile)) break;
+      }
+    }
+    throw new Error('Session memory is locked by another writer; retry shortly');
+  } finally {
+    releaseMemoryLock(candidate, owner);
+    try { fs.rmdirSync(candidate); } catch {}
+  }
+}
+
 function updateSessionMemoryFile({ manifestFile, session, expectedRevision, operation, now }) {
   let name = String(session || '').trim();
   if (!name) throw new Error('Session name is required');
@@ -255,7 +332,7 @@ function updateSessionMemoryFile({ manifestFile, session, expectedRevision, oper
   let lock;
   let tempFile = '';
   try {
-    lock = fs.openSync(lockFile, 'wx', 0o600);
+    lock = acquireMemoryLock(lockFile);
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
     name = resolveSessionName(name, manifest);
     const record = manifest.sessions && manifest.sessions[name];
@@ -270,14 +347,14 @@ function updateSessionMemoryFile({ manifestFile, session, expectedRevision, oper
     tempFile = path.join(path.dirname(manifestFile), `.${path.basename(manifestFile)}.${process.pid}.${Date.now()}.tmp`);
     fs.writeFileSync(tempFile, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
     fs.chmodSync(tempFile, 0o600);
+    if (!fs.existsSync(path.join(lockFile, lock))) throw new Error('Session memory lock ownership was lost');
     fs.renameSync(tempFile, manifestFile);
     tempFile = '';
     return updated;
   } finally {
     if (tempFile) { try { fs.unlinkSync(tempFile); } catch {} }
     if (lock !== undefined) {
-      try { fs.closeSync(lock); } catch {}
-      try { fs.unlinkSync(lockFile); } catch {}
+      releaseMemoryLock(lockFile, lock);
     }
   }
 }

@@ -2,9 +2,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const schema = require('./preferenceSchema');
-const DEFAULT_FILE = path.join(os.homedir(), '.local/share/terminaltown/preferences.json');
+const DEFAULT_FILE = path.join(process.env.TERMINALTOWN_DATA_DIR || path.join(os.homedir(), '.local/share/terminaltown-public'), 'preferences.json');
 function createPreferenceStore(file = DEFAULT_FILE) {
+  let memory = { version: 1, revision: 0, shared: {}, devices: {} };
   function read() {
+    if (file === null) return structuredClone(memory);
     try {
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (data.version !== 1 || !data.shared || !data.devices) throw new Error('Invalid preferences file');
@@ -22,6 +24,7 @@ function createPreferenceStore(file = DEFAULT_FILE) {
     return { revision: data.revision, values: { ...data.shared, ...(data.devices[id] || {}) } };
   }
   function locked(action) {
+    if (file === null) return action();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const lock = file + '.lock';
     const deadline = Date.now() + 2000;
@@ -67,10 +70,13 @@ function createPreferenceStore(file = DEFAULT_FILE) {
       }
       if (changed) {
         data.revision += 1;
-        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-        const temporary = file + '.' + process.pid + '.tmp';
-        fs.writeFileSync(temporary, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-        fs.renameSync(temporary, file);
+        if (file === null) memory = data;
+        else {
+          fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+          const temporary = file + '.' + process.pid + '.tmp';
+          fs.writeFileSync(temporary, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+          fs.renameSync(temporary, file);
+        }
       }
       return view(data, id);
       });

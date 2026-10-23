@@ -5,7 +5,6 @@ const { execFile } = require('child_process');
 const { activeQuestionFromJsonl, buildAnswerSteps } = require('./codexQuestions');
 const {
   normalizeSessionMemory,
-  seedSessionMemory,
   composeHydrationPrompt,
   composeLandingPrompt,
   rotationDecision,
@@ -40,7 +39,7 @@ function desktopSnapshot(name, slot, spans = {}) {
 }
 
 const NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
-const DATA_DIR = path.join(os.homedir(), '.local', 'share', 'terminaltown');
+const DATA_DIR = process.env.TERMINALTOWN_DATA_DIR || path.join(os.homedir(), '.local', 'share', 'terminaltown-public');
 const LEGACY_DATA_DIR = path.join(os.homedir(), '.local', 'share', 'ai-grid');
 const LAYOUT_FILE = path.join(DATA_DIR, 'layout.json');
 const LEGACY_LAYOUT_FILE = path.join(LEGACY_DATA_DIR, 'layout.json');
@@ -50,15 +49,16 @@ const SNAPSHOT_DIR = path.join(DATA_DIR, 'snapshots');
 const SCROLLBACK_DIR = path.join(DATA_DIR, 'scrollback');
 const PASTE_DIR = path.join(DATA_DIR, 'pastes');
 const SESSION_MEMORY_COMMAND = path.resolve(__dirname, '..', 'scripts', 'terminaltown-session-memory.js');
-const HYDRATION_DIR = path.join(os.homedir(), '.local', 'share', 'terminaltown', 'hydration');
+const HYDRATION_DIR = path.join(DATA_DIR, 'hydration');
 const PANEL_ROTATE_TOKENS = Number(process.env.TERMINALTOWN_ROTATE_TOKENS) || ROTATE_CONTEXT_TOKENS;
-const PANEL_ROTATION_ENABLED = process.env.TERMINALTOWN_ROTATION !== '0';
+const PANEL_ROTATION_ENABLED = process.env.TERMINALTOWN_ROTATION === '1';
 const panelIdleSince = new Map();
 let panelRotationRunning = false;
 const SUMMON_DIR = path.join(os.homedir(), '.vscode-summon');
 const SUMMON_QUEUE = path.join(SUMMON_DIR, 'queue.jsonl');
 const TITLES_FILE = path.join(SUMMON_DIR, 'titles.json');
 const PROJECT_ROOT = process.env.TERMINALTOWN_PROJECT_ROOT || process.cwd();
+const CLAUDE_DEFAULT_COMMAND = String(process.env.TERMINALTOWN_CLAUDE_COMMAND || 'claude').trim() || 'claude';
 const TERMINALS_JSON = process.env.TERMINALTOWN_TERMINALS_FILE || path.join(PROJECT_ROOT, '.vscode', 'terminals.json');
 const EXTERNAL_TERMINAL_URL = process.env.TERMINALTOWN_EXTERNAL_TERMINAL_URL || process.env.AI_GRID_EXTERNAL_TERMINAL_URL || '';
 const SLOT_COUNT = 12;
@@ -1419,7 +1419,7 @@ function readLayoutState(allSessions, board = {}) {
   }
 
   for (const name of allSessions) {
-    if (name === LARSON_DESKTOP_SESSION || used.has(name)) continue;
+    if (name === LARSON_DESKTOP_SESSION || name.startsWith('terminaltown-meta-') || used.has(name)) continue;
     const open = slots.indexOf('');
     if (open === -1) break;
     slots[open] = name;
@@ -1670,7 +1670,6 @@ async function createAiSession({ session, cwd, command, initialPrompt, placement
     patch.pendingPromptQueuedAt = new Date().toISOString();
     patch.pendingPromptKind = '';
     patch.pendingPromptConversationId = '';
-    patch.memory = seedSessionMemory(pendingPrompt, patch.pendingPromptQueuedAt);
   }
   if (ctx.isDefault) patch.slot = slotForName(session, placedState.slots);
   upsertManifestRecord(manifest, session, patch);
@@ -1694,9 +1693,56 @@ async function createMetaSession({ goal, slot, kind, cwd, board }) {
   const title = cleanTitle(roleTitle(text));
   const session = await uniqueSessionName(title);
   const command = sessionKind === 'claude'
-    ? 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide'
+    ? CLAUDE_DEFAULT_COMMAND
     : codexFullPermissionCommand();
   return createAiSession({ session, cwd: String(cwd || PROJECT_ROOT), command, initialPrompt: text, placement: String(requestedSlot), title, board });
+}
+
+function metaTerminalName(board) {
+  return `terminaltown-meta-${kebab(boardContext(board).id).slice(0, 36)}`;
+}
+
+const pendingMetaStarts = new Map();
+async function ensureMetaTerminal(board = {}) {
+  const name = metaTerminalName(board);
+  if (pendingMetaStarts.has(name)) return pendingMetaStarts.get(name);
+  const operation = (async () => {
+    // Opening an existing dormant Meta does not restart its saved agent.
+    if (!readManifest().sessions[name]) {
+      if (await exactSessionExists(name)) throw new Error(`The Meta session name ${name} is already in use.`);
+      const cwd = normalizeProjectPath(PROJECT_ROOT);
+      if (!fs.existsSync(cwd)) throw new Error(`Directory does not exist: ${cwd}`);
+      await tmux(['new-session', '-d', '-s', name, '-c', cwd], { timeout: 5000 });
+      const manifest = readManifest();
+      upsertManifestRecord(manifest, name, {
+        kind: 'codex', title: 'Meta Terminal', cwd, command: CODEX_FULL_PERMISSION_COMMAND,
+        target: defaultTarget(name), slot: null,
+      });
+      writeManifest(manifest);
+      await tmux(['send-keys', '-t', `=${name}:`, CODEX_FULL_PERMISSION_COMMAND, 'Enter'], { timeout: 5000 });
+    }
+    return collectMetaTerminal(board);
+  })();
+  pendingMetaStarts.set(name, operation);
+  try { return await operation; }
+  finally { pendingMetaStarts.delete(name); }
+}
+
+async function collectMetaTerminal(board = {}) {
+  const name = metaTerminalName(board);
+  const manifest = readManifest();
+  const [liveTargets, procIndex, codexPaths, codexLocks] = await Promise.all([
+    readLiveTargets(manifest), readProcessIndex(), readCodexPathMap(), readCodexLockIndex(),
+  ]);
+  const claudeRecords = readClaudeSessionRecords();
+  const result = await snapshot(name, null, new Map(), {}, {
+    observeOnly: true, manifest, liveTargets, procIndex, codexPaths, codexLocks,
+    claudeIndex: readClaudeSessionIndex(claudeRecords), claudeBySid: claudeBySid(claudeRecords),
+    attentionIndex: readAttentionIndex(),
+  });
+  const latest = readManifest();
+  if (updateManifestFromSnapshots(latest, [result], { ...board, preserveSlots: true })) writeManifest(latest);
+  return result;
 }
 
 function codexPromptReady(output) {
@@ -1749,6 +1795,10 @@ function queuePendingPrompt(name, prompt) {
   schedulePendingPromptDelivery(name);
 }
 
+function sessionMemoryCommand(session) {
+  return [process.execPath, SESSION_MEMORY_COMMAND, '--manifest', MANIFEST_FILE, '--session', session].map(shellSingleQuote).join(' ');
+}
+
 function observedConversation(record) {
   if (!record) return { kind: '', id: '' };
   if (record.kind === 'codex' && SID_RE.test(String(record.threadId || ''))) return { kind: 'codex', id: record.threadId };
@@ -1762,7 +1812,7 @@ function memoryHydrationPatch(name, record, conversation) {
   if (result.action === 'bind') return { memory: result.memory };
   if (result.action !== 'hydrate' || String(record.pendingPrompt || '').trim()) return {};
   return {
-    pendingPrompt: composeHydrationPrompt(current, { session: name, memoryCommand: SESSION_MEMORY_COMMAND }),
+    pendingPrompt: composeHydrationPrompt(current, { session: name, memoryCommand: sessionMemoryCommand(name) }),
     pendingPromptQueuedAt: new Date().toISOString(),
     pendingPromptKind: 'memory',
     pendingPromptConversationId: conversation.id,
@@ -2311,7 +2361,9 @@ function adoptLiveClaudeRecords(manifest, slots, titles, claudeRecords, liveTarg
     const existingByTarget = Object.entries(manifest.sessions)
       .find(([existingName, item]) => {
         const target = normalizeTarget(item && item.target, existingName);
-        return target && target.session === record.target.session && target.socket === record.target.socket;
+        const observed = normalizeTarget(record.target);
+        return target && observed && target.session === observed.session && target.socket === observed.socket &&
+          targetSpec(target) === targetSpec(observed);
       });
     const name = existingBySid || existingByTarget
       ? (existingBySid || existingByTarget)[0]
@@ -2328,10 +2380,10 @@ function adoptLiveClaudeRecords(manifest, slots, titles, claudeRecords, liveTarg
       kind: 'claude',
       title,
       cwd: record.cwd || livePane.cwd || '',
-      command: `claude --dangerously-skip-permissions --resume ${record.sessionId} --rc --ide`,
+      command: `claude --resume ${record.sessionId} --rc --ide`,
       resumeId: record.sessionId,
       threadId: '',
-      target: normalizeTarget({ socket: record.target.socket, session: record.target.session }, name),
+      target: normalizeTarget(record.target, name),
       lastSeenAt: now - prevSeen > 60000 ? new Date(now).toISOString() : prev && prev.lastSeenAt || '',
     };
     if (writeSlots) patch.slot = slotForName(name, slots);
@@ -2465,7 +2517,7 @@ function agentFreshStartCommand(name, record) {
   const memory = normalizeSessionMemory(record && record.memory);
   const kind = record && record.kind;
   if (!NAME_RE.test(String(name || '')) || !memory.approvedCharter || !['claude', 'codex'].includes(kind)) return '';
-  return launchWithPromptFile(name, kind, composeHydrationPrompt(memory, { session: name, memoryCommand: SESSION_MEMORY_COMMAND, mode: 'standby' }), record);
+  return launchWithPromptFile(name, kind, composeHydrationPrompt(memory, { session: name, memoryCommand: sessionMemoryCommand(name), mode: 'standby' }), record);
 }
 
 function isRunningAgent(record, command) {
@@ -2503,7 +2555,7 @@ function launchWithPromptFile(name, kind, text, record = null) {
   fs.writeFileSync(file, String(text), { mode: 0o600 });
   const arg = `"$(cat ${shellSingleQuote(file)})"`;
   return kind === 'claude'
-    ? `claude --dangerously-skip-permissions --rc --ide ${arg}`
+    ? `claude --rc --ide ${arg}`
     : codexPanelCommand(record, arg);
 }
 
@@ -2526,7 +2578,7 @@ async function startAgentOnFirstMessage(session, record, target, live, prompt) {
   }
   const memory = normalizeSessionMemory(record.memory);
   const text = memory.approvedCharter
-    ? `${composeHydrationPrompt(memory, { session, memoryCommand: SESSION_MEMORY_COMMAND })}\n\nUSER REQUEST\n${String(prompt).trim()}`
+    ? `${composeHydrationPrompt(memory, { session, memoryCommand: sessionMemoryCommand(session) })}\n\nUSER REQUEST\n${String(prompt).trim()}`
     : String(prompt).trim();
   const command = launchWithPromptFile(session, record.kind, text, record);
   const cwd = record.cwd && fs.existsSync(record.cwd) ? record.cwd : '';
@@ -2591,7 +2643,7 @@ async function applyPanelRotations(sessions) {
       if (kind === 'claude') Object.assign(patch, { kind, resumeId: s.resumeId });
       if (decision.action === 'land') {
         Object.assign(patch, {
-          pendingPrompt: composeLandingPrompt(s.contextTokens, SESSION_MEMORY_COMMAND),
+          pendingPrompt: composeLandingPrompt(s.contextTokens, sessionMemoryCommand(s.name)),
           pendingPromptQueuedAt: new Date(now).toISOString(),
           pendingPromptKind: 'rotation',
           pendingPromptConversationId: conversationId,
@@ -2619,7 +2671,7 @@ async function spawnRecoveredSession(name, record, freshCommand = '') {
   if (freshCommand) {
     command = freshCommand;
   } else if (record.kind === 'claude' && SID_RE.test(record.resumeId || '')) {
-    command = `claude --dangerously-skip-permissions --resume ${record.resumeId} --rc --ide`;
+    command = `claude --resume ${record.resumeId} --rc --ide`;
   } else if (record.kind === 'codex' && SID_RE.test(record.threadId || '')) {
     command = codexPanelResumeCommand(record);
   }
@@ -2631,7 +2683,7 @@ async function spawnRecoveredSession(name, record, freshCommand = '') {
 
 function agentResumeCommand(record) {
   if (record && record.kind === 'claude' && SID_RE.test(record.resumeId || '')) {
-    return `claude --dangerously-skip-permissions --resume ${record.resumeId} --rc --ide`;
+    return `claude --resume ${record.resumeId} --rc --ide`;
   }
   if (record && record.kind === 'codex' && SID_RE.test(record.threadId || '')) {
     return codexPanelResumeCommand(record);
@@ -2696,7 +2748,7 @@ async function recoverMissingSessions(options = {}) {
         kind: 'claude',
         title,
         cwd: liveClaude.cwd || livePane.cwd || (current && current.cwd) || PROJECT_ROOT,
-        command: `claude --dangerously-skip-permissions --resume ${resumeId} --rc --ide`,
+        command: `claude --resume ${resumeId} --rc --ide`,
         resumeId,
         target: liveClaude.target,
         ...(board.isDefault ? { slot: slotForName(name, slots) } : {}),
@@ -2712,7 +2764,7 @@ async function recoverMissingSessions(options = {}) {
       title,
       cwd: fallbackClaude && fallbackClaude.cwd || PROJECT_ROOT,
       resumeId,
-      command: `claude --dangerously-skip-permissions --resume ${resumeId} --rc --ide`,
+      command: `claude --resume ${resumeId} --rc --ide`,
     } : null);
     if (!recoveryRecord || (!recoveryRecord.resumeId && !recoveryRecord.threadId && !recoveryRecord.command)) {
       result.skipped += 1;
@@ -2848,7 +2900,7 @@ async function snapshot(name, slot, titles = new Map(), spans = {}, signalContex
   try {
     // tmux sanitizes literal tabs to underscores in a non-UTF-8 service
     // environment. Use printable separators, with the free-form command last.
-    const pane = (await tmuxSocket(target.socket, ['list-panes', '-t', targetSpec(target), '-F', '#{pane_pid}|#{pane_width}|#{pane_height}|#{alternate_on}|#{pane_current_command}']))
+    const pane = (await tmuxSocket(target.socket, ['display-message', '-p', '-t', targetSpec(target), '#{pane_pid}|#{pane_width}|#{pane_height}|#{alternate_on}|#{pane_current_command}']))
       .split('\n')[0] || '';
     paneMetadataAvailable = Boolean(pane);
     const parts = pane.split('|');
@@ -3020,7 +3072,7 @@ function updateManifestFromSnapshots(manifest, sessions, options = {}) {
     if (patch.kind === 'codex' && SID_RE.test(patch.threadId || '')) {
       patch.command = codexPanelResumeCommand(patch);
     } else if (patch.kind === 'claude' && SID_RE.test(patch.resumeId || '')) {
-      patch.command = `claude --dangerously-skip-permissions --resume ${patch.resumeId} --rc --ide`;
+      patch.command = `claude --resume ${patch.resumeId} --rc --ide`;
     } else {
       patch.command = normalizeCodexLaunchCommand(prev.command || session.command || '');
     }
@@ -3151,8 +3203,10 @@ async function collectLive(options = {}) {
     try { await applyPanelRotations(sessions); } catch {}
   }
   if (!options.observeOnly) {
-    await reviveExitedAiSessions(sessions, manifest);
-    if (updateManifestFromSnapshots(manifest, sessions, board)) writeManifest(manifest);
+    if (process.env.TERMINALTOWN_AUTO_RECOVER === '1') await reviveExitedAiSessions(sessions, readManifest());
+    // Rotation and recovery persist through separately loaded manifests.
+    const latest = readManifest();
+    if (updateManifestFromSnapshots(latest, sessions, board)) writeManifest(latest);
   }
   // Meta lives outside the grid, but still needs its live conversation ID for
   // safe future resume. Do not place it in a slot or auto-restart it here.
@@ -3165,7 +3219,7 @@ async function collectLive(options = {}) {
     const latest = readManifest();
     if (updateManifestFromSnapshots(latest, [metaSnapshot], { ...board, preserveSlots: true })) writeManifest(latest);
   }
-  if (!options.observeOnly) schedulePendingPromptSweep(manifest);
+  if (!options.observeOnly) schedulePendingPromptSweep(readManifest());
   const warning = collapseWarning(slots, sessions, allSessions);
   return {
     at: Date.now(),
@@ -3446,7 +3500,7 @@ function createTerminalKeyDispatcher({ resolveSession, send }) {
 async function answerCodexQuestion(session, submission) {
   if (!NAME_RE.test(session)) throw new Error('bad session');
   const { target } = await resolveSessionActionTarget(session);
-  const pane = (await tmuxSocket(target.socket, ['list-panes', '-t', targetSpec(target), '-F', '#{pane_pid}'], { timeout: 3000 })).split('\n')[0];
+  const pane = (await tmuxSocket(target.socket, ['display-message', '-p', '-t', targetSpec(target), '#{pane_pid}'], { timeout: 3000 })).trim();
   const [procIndex, codexPaths, codexLocks] = await Promise.all([
     readProcessIndex(), readCodexPathMap(), readCodexLockIndex(),
   ]);
@@ -3595,7 +3649,7 @@ async function pickPlacement(vscode, defaultSlot = null, board = {}) {
 async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', board = {}) {
   const presets = presetSessions();
   const choices = [
-    { label: 'Blank Claude session', kind: 'claude', description: 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide' },
+    { label: 'Blank Claude session', kind: 'claude', description: CLAUDE_DEFAULT_COMMAND },
     { label: 'Blank Codex session', kind: 'codex', description: CODEX_FULL_PERMISSION_COMMAND },
     ...presets.map((preset) => ({ ...preset, kind: 'preset' })),
   ];
@@ -3622,7 +3676,7 @@ async function newSessionWizard(vscode, defaultSlot = null, forcedKind = '', boa
       ignoreFocusOut: true,
     });
     if (!cwd) return null;
-    command = 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide';
+    command = CLAUDE_DEFAULT_COMMAND;
   } else if (source.kind === 'codex') {
     cwd = await vscode.window.showInputBox({
       title: 'Project Directory',
@@ -3682,6 +3736,10 @@ async function renameWizard(vscode, session, currentTitle = '') {
 
 function nonce() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function scriptValue(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
 function html(webview, discoBallSrc = '', purrSrc = '', refractionSrc = '', discoSettings = DISCO_SETTINGS_DEFAULTS) {
@@ -5057,7 +5115,7 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
     <div class="head"><div class="head-main"><span class="idx">MT</span><span class="name">Meta Terminal</span><button type="button" id="metaMemory" class="memory-badge" title="Open saved Meta memory">Memory saved</button><span class="meta" id="metaStatus">Starting</span></div>
       <div class="head-actions"><button type="button" id="metaEsc" title="Send Escape" aria-label="Send Escape to Meta Terminal">Esc</button><button type="button" id="metaPaste" class="icon-button" data-icon="paste" title="Paste host clipboard into terminal" aria-label="Paste into Meta Terminal"></button><button type="button" id="metaTools" class="icon-button" data-icon="more" title="Meta Terminal controls" aria-label="Meta Terminal controls" aria-haspopup="dialog" aria-controls="metaMenu" aria-expanded="false"></button><button type="button" id="closeMeta" class="icon-button" data-icon="close" title="Close Meta Terminal dock" aria-label="Close Meta Terminal dock"></button></div>
       <section id="metaMenu" class="command-popover panel-menu" popover="manual" role="dialog" aria-label="Meta Terminal controls" hidden>
-        <h2>Meta Terminal</h2><button type="button" id="metaCopy">Copy terminal history</button>
+        <h2>Meta Terminal</h2><button type="button" id="metaCopy">Copy terminal history</button><button type="button" id="metaMemoryMenu">Session memory…</button>
         <hr><h2>Terminal keys</h2><div class="key-grid"><button type="button" id="metaTab" title="Send draft with Tab, or send Tab">Tab ⇥</button><button type="button" id="metaEnter" title="Send Enter without submitting the draft">Enter ↵</button><button type="button" id="metaCtrlC" title="Interrupt the running command">Interrupt · Ctrl+C</button></div>
         <hr><h2>Dock position</h2><button type="button" id="metaSide">Side</button><button type="button" id="metaBottom">Bottom</button>
       </section>
@@ -5067,6 +5125,9 @@ ${fs.readFileSync(path.join(__dirname, 'panelHealth.css'), 'utf8')}
 <script nonce="${n}">
 window.terminalTownHealthUiBuild = ${JSON.stringify(require('./panelHealth').frontendIdentity(__dirname))};
 const vscode = acquireVsCodeApi();
+const PROJECT_ROOT = ${scriptValue(PROJECT_ROOT)};
+const CLAUDE_DEFAULT_COMMAND = ${scriptValue(CLAUDE_DEFAULT_COMMAND)};
+const CODEX_FULL_PERMISSION_COMMAND = ${scriptValue(CODEX_FULL_PERMISSION_COMMAND)};
 ${fs.readFileSync(path.join(__dirname, 'preferenceSchema.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'preferences.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'artifactReferences.js'), 'utf8')}
@@ -5418,7 +5479,8 @@ function populateMemoryDialog(force = false) {
   const memory = record.memory || {};
   const revision = String(Number(memory.revision) || 0);
   const changed = sessionMemoryDialog.dataset.revision !== revision;
-  if (force || sessionMemoryDialog.dataset.pending === '1' || (changed && sessionMemoryDialog.dataset.dirty !== '1')) {
+  const pending = sessionMemoryDialog.dataset.pending === '1';
+  if (force || (!window.terminalTownBrowserHost && pending) || (!pending && changed && sessionMemoryDialog.dataset.dirty !== '1')) {
     memoryApprovedCharter.value = String(memory.approvedCharter || '');
     memoryContext.value = String(memory.contextSummary || '');
     sessionMemoryDialog.dataset.revision = revision;
@@ -5428,15 +5490,15 @@ function populateMemoryDialog(force = false) {
   document.getElementById('sessionMemoryTitle').textContent = 'Session memory · ' + (record.display || record.name);
   document.getElementById('memoryCharterMeta').textContent = memoryTimestamp(memory.approvedAt);
   document.getElementById('memoryContextMeta').textContent = memoryTimestamp(memory.contextUpdatedAt);
-  const pending = memory.reviewState === 'pending' && Boolean(memory.proposedCharter);
-  memoryProposalReview.hidden = !pending;
+  const proposalPending = memory.reviewState === 'pending' && Boolean(memory.proposedCharter);
+  memoryProposalReview.hidden = !proposalPending;
   document.getElementById('memoryProposalBefore').textContent = String(memory.approvedCharter || '');
   document.getElementById('memoryProposalAfter').textContent = String(memory.proposedCharter || '');
   document.getElementById('memoryProposalReason').textContent = String(memory.proposalReason || '');
 }
 function openMemoryDialog(slot, trigger) {
   const record = slot === 'meta' ? metaMemoryRecord : slotRecords[slot];
-  if (!record || !record.name || !record.memory || !record.memory.approvedCharter) return;
+  if (!record || !record.name || !record.memory) return;
   memoryDialogSlot = slot;
   memoryReturnFocus = trigger.closest('.tile').querySelector('.tools-toggle') || trigger;
   sessionMemoryDialog.dataset.dirty = '';
@@ -5449,6 +5511,7 @@ function closeMemoryDialog() { if (sessionMemoryDialog.open) sessionMemoryDialog
 function submitMemoryMutation(type, value) {
   const record = memoryRecord();
   if (!record || !record.name) return;
+  const draft = [memoryApprovedCharter.value, memoryContext.value];
   sessionMemoryDialog.dataset.pending = '1';
   const request = post(type, {
     slot: memoryDialogSlot, meta: memoryDialogSlot === 'meta', session: record.name,
@@ -5456,7 +5519,25 @@ function submitMemoryMutation(type, value) {
     ...(value === undefined ? {} : { value }),
   });
   if (request && typeof request.then === 'function') request.then(result => {
-    if (result && result.ok === false) sessionMemoryDialog.dataset.pending = '';
+    if (memoryRecord()?.name !== record.name) return;
+    sessionMemoryDialog.dataset.pending = '';
+    if (result?.ok === true) {
+      const saved = memoryRecord().memory || {};
+      const fields = [
+        [memoryApprovedCharter, 'approvedCharter', 'memoryUpdateCharter'],
+        [memoryContext, 'contextSummary', 'memoryUpdateContext'],
+      ];
+      fields.forEach(([field, key, updateType], index) => {
+        // Saving one field must not discard edits to the other, or new typing
+        // that happened while the request was in flight.
+        if (field.value === draft[index] && (type === updateType || draft[index] === String(record.memory?.[key] || ''))) {
+          field.value = String(saved[key] || '');
+        }
+      });
+      sessionMemoryDialog.dataset.revision = String(Number(saved.revision) || 0);
+      sessionMemoryDialog.dataset.dirty = fields.some(([field, key]) => field.value !== String(saved[key] || '')) ? '1' : '';
+      populateMemoryDialog();
+    }
   }).catch(() => { sessionMemoryDialog.dataset.pending = ''; });
 }
 for (const field of [memoryApprovedCharter, memoryContext]) field.addEventListener('input', () => { sessionMemoryDialog.dataset.dirty = '1'; });
@@ -5466,6 +5547,7 @@ document.getElementById('memorySaveContext').addEventListener('click', () => sub
 document.getElementById('memoryApprove').addEventListener('click', () => submitMemoryMutation('memoryApproveCharter'));
 document.getElementById('memoryReject').addEventListener('click', () => submitMemoryMutation('memoryRejectCharter'));
 document.getElementById('metaMemory').addEventListener('click', event => openMemoryDialog('meta', event.currentTarget));
+document.getElementById('metaMemoryMenu').addEventListener('click', event => openMemoryDialog('meta', event.currentTarget));
 sessionMemoryDialog.addEventListener('cancel', event => { event.preventDefault(); closeMemoryDialog(); });
 sessionMemoryDialog.addEventListener('close', () => {
   const target = memoryReturnFocus;
@@ -7138,7 +7220,9 @@ function syncArcade() {
 ${fs.readFileSync(path.join(__dirname, 'larsonDesktop.js'), 'utf8')}
 ${fs.readFileSync(path.join(__dirname, 'codexQuestionsClient.js'), 'utf8')}
 function makeOptions(select, selected) {
-  const names = ['', LARSON_DESKTOP_SESSION].concat(selected && selected !== LARSON_DESKTOP_SESSION && !allSessions.includes(selected) ? [selected] : [], allSessions);
+  const desktopAvailable = Boolean(String(window.terminalTownDesktopUrl || '').trim());
+  const names = [...new Set([''].concat(desktopAvailable ? [LARSON_DESKTOP_SESSION] : [], selected ? [selected] : [], allSessions))]
+    .filter(name => name !== LARSON_DESKTOP_SESSION || desktopAvailable);
   const sig = names.join('\\u0000') + '\\u0001' + selected + '\\u0001' + JSON.stringify(titles);
   if (select.dataset.sig === sig) return;
   select.innerHTML = '';
@@ -7435,7 +7519,7 @@ function render(data, optimistic = false) {
     const stoppedAgent = Boolean((session.threadId || session.resumeId) && !/^(?:codex|claude)(?:\\s|$)/i.test(String(session.command || '')));
     el.querySelector('.meta').textContent = session.name ? ((stoppedAgent ? (el.classList.contains('has-memory') ? '' : 'Stopped · ') + (session.command || 'shell') : session.dormant ? 'sleeping · next message starts it' : (session.command || 'pane')) + ' c:' + session.clients + (session.contextTokens ? ' ctx:' + Math.round(session.contextTokens / 1000) + 'k' + (session.rotation && session.rotation.state ? '·' + session.rotation.state : '') : '') + (session.target ? ' @ ' + session.target : '')) : '';
     el.querySelector('.memory-badge').textContent = el.classList.contains('memory-review') ? 'Review' : stoppedAgent ? 'Memory · stopped' : 'Memory saved';
-    el.querySelector('.memory').hidden = !(session.memory && session.memory.approvedCharter);
+    el.querySelector('.memory').hidden = !session.name || !session.memory;
     syncLarsonDesktop(el, session, boardId);
     syncCodexQuestion(el, session);
     makeOptions(el.querySelector('.assign-session'), session.name || '');
@@ -7726,16 +7810,16 @@ function browserNewSession(kind = '') {
   if (!title || !title.trim()) return;
   const session = kebabForBrowser(title);
   const defaultCommand = normalizedKind === 'claude'
-    ? 'claude --dangerously-skip-permissions --model opus --effort max --rc --ide'
+    ? CLAUDE_DEFAULT_COMMAND
     : normalizedKind === 'codex'
-      ? '${CODEX_FULL_PERMISSION_COMMAND}'
+      ? CODEX_FULL_PERMISSION_COMMAND
       : 'zsh';
   const command = prompt('Command', defaultCommand);
   if (!command) return;
   const initialPrompt = prompt('Initial prompt (optional)', '');
   if (initialPrompt === null) return;
   const placement = browserPlacementValue(prompt('Place in: first, selected, holding, or slot number', 'first'));
-  post('newSession', { slot: selectedSlot, kind: normalizedKind, cwd, session: '', title, command, initialPrompt, placement });
+  post('newSession', { slot: selectedSlot, kind: normalizedKind, cwd, session, title, command, initialPrompt, placement });
 }
 async function browserOpenBoard(create = false) {
   if (!window.terminalTownBrowserHost) {
@@ -8568,7 +8652,7 @@ armRefreshInterval();
 </html>`;
 }
 
-const extensionPreferenceStore = require('./preferenceStore').createPreferenceStore();
+const extensionPreferenceStore = require('./preferenceStore').createPreferenceStore(path.join(DATA_DIR, 'preferences.json'));
 function handlePreferenceMessage(msg, webview) {
   if (msg.type !== 'preferences') return false;
   try {
@@ -9941,6 +10025,8 @@ module.exports = {
   moveSessionToBoard,
   createAiSession,
   createMetaSession,
+  ensureMetaTerminal,
+  collectMetaTerminal,
   CODEX_FULL_PERMISSION_COMMAND,
   codexUpdatePromptVisible,
   queuePendingPrompt,
